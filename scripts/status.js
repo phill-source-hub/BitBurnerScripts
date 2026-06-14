@@ -1,6 +1,6 @@
 /**
  * status.js
- * Version: 1.0.0
+ * Version: 1.0.1
  *
  * Realtime dashboard displaying orchestrate, hacknet, and server state.
  *
@@ -116,8 +116,8 @@ export async function main(ns) {
         return;
     }
 
-    // Display only in log window — users view via tail /scripts/status.js
-    ns.tail();
+    // Display only in log window — opens the tail window automatically
+    ns.ui.openTail();
 
     while (true) {
         ns.clearLog();                                                              // Wipe previous frame for clean refresh
