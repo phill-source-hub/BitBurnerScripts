@@ -43,7 +43,7 @@
  */
 
 // --- RAM constants ---
-const WORKER_RAM  = 1.75;                                                           // GB RAM cost per worker thread
+const WORKER_RAM  = 2.0;                                                            // GB RAM cost per worker thread
 const RAM_TIER_0  = 8;                                                              // Home RAM threshold for tier 0
 const RAM_TIER_1  = 16;                                                             // Home RAM threshold for tier 1
 const RAM_TIER_2  = 32;                                                             // Home RAM threshold for tier 2
@@ -109,7 +109,7 @@ export function getAllServers(ns, host = 'home', visited = new Set()) {
 
 /**
  * Returns all servers suitable for running worker threads.
- * Criteria: rooted, not home, maxRam >= WORKER_RAM (1.75GB).
+ * Criteria: rooted, not home, maxRam >= WORKER_RAM (2.0GB).
  * Sorted by maxRam descending so the scheduler fills large servers first,
  * minimising process count and ns.exec() calls.
  * @param {NS} ns - Netscript object

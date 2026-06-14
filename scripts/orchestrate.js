@@ -105,7 +105,7 @@ const LAND_SPACING  = 20;                                                       
 const BATCH_SPACING = 100;                                                          // ms between consecutive batch starts on same target
 
 // --- Allocation constants ---
-const WORKER_RAM            = 1.75;                                                 // GB RAM cost per worker thread
+const WORKER_RAM            = 2.0;                                                  // GB RAM cost per worker thread
 const MAX_TARGETS           = 5;                                                    // Maximum simultaneous hack targets in tier 1+
 const LOOP_SLEEP            = 200;                                                  // Minimum ms between scheduler cycles
 const SAFE_WEAKEN_PER_GROW  = 1 / 4;                                               // Conservative weaken ratio: 1 weaken per 4 grow threads

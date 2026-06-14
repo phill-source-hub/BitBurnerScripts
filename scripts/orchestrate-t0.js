@@ -52,7 +52,7 @@ import {
 // --- Constants ---
 const WORKER_SCRIPT = 'scripts/worker.js';
 const FULL_SCRIPT   = 'scripts/orchestrate.js';
-const WORKER_RAM    = 1.75;
+const WORKER_RAM    = 2.0;
 const GROW_RATIO    = 0.60;
 const LOOP_SLEEP    = 200;
 const PORT_STATUS   = 1;
