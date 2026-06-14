@@ -37,6 +37,7 @@ const SCRIPTS = [
     'worker.js',
     'orchestrate.js',
     'auto-root.js',
+    'backdoor.js',
     'buy-servers.js',
     'upgrade-servers.js',
     'hacknet-manager.js',

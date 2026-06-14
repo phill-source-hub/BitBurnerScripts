@@ -23,11 +23,12 @@
  *   port 2 each cycle without consuming.
  *
  * Changelog:
+ *   v1.2.0 - Backdoor logic moved to backdoor.js (exec fire-and-forget).
+ *            Removes lib-sf-utils.js import — auto-root now pays zero
+ *            singularity RAM cost regardless of SF4 ownership.
  *   v1.1.0 - Imports hasSF + getPath from lib-sf-utils.js (not lib-utils).
- *            Inlines getAllServers, getRootAccess, canHack to eliminate cracker
- *            RAM costs from lib-utils and reduce all other scripts' footprints.
- *   v1.0.0 - Initial version. Clean rewrite of v1.4.1 reference.
- *            Adds port 2 write on new roots. Adds SF4 auto-backdoor.
+ *            Inlines getAllServers, getRootAccess, canHack.
+ *   v1.0.0 - Initial version.
  *
  * Flags:
  *   --help    Show version, usage, and flags then exit
@@ -38,7 +39,6 @@
  *
  * Dependencies:
  *   import { ... } from '/scripts/lib-utils.js';
- *   import { ... } from '/scripts/lib-sf-utils.js';
  */
 
 import {
@@ -47,16 +47,12 @@ import {
     log,
 } from '/scripts/lib-utils.js';
 
-import {
-    hasSF,
-    getPath,
-} from '/scripts/lib-sf-utils.js';
-
 // --- Constants ---
 const WATCH_INTERVAL     = 5 * 60 * 1000;                                          // 5 minutes between watch cycles
 const KILL_SETTLE_MS     = 500;                                                     // ms to wait after killing orchestrate before relaunch
 const PORT_AUTOROOT      = 2;                                                       // Port this script owns and writes to
 const ORCHESTRATE_SCRIPT = '/scripts/orchestrate.js';                              // Path to orchestrate for relaunch
+const BACKDOOR_SCRIPT    = 'scripts/backdoor.js';                                   // Launched per-host when SF4 available
 
 // All known port-cracker programs
 const CRACKERS = [
@@ -122,44 +118,15 @@ function getOwnedCrackers(ns) {
 }
 
 /**
- * Attempts to backdoor a newly rooted server using SF4 singularity functions.
- * Connects hop-by-hop using the path from home, installs backdoor, returns home.
- * Silently skips if path not found or singularity call fails.
- * @param {NS} ns
- * @param {string} host - Target hostname to backdoor
- */
-async function backdoor(ns, host) {
-    const path = getPath(ns, host);                                                 // BFS hop path from home to target
-    if (path.length === 0) {
-        log(ns, 'backdoor: no path to ' + host + ' — skipping');
-        return;
-    }
-
-    try {
-        // Connect each hop in sequence — singularity.connect moves one hop at a time
-        for (const hop of path) {
-            ns.singularity.connect(hop);
-        }
-        await ns.singularity.installBackdoor();                                     // Install backdoor on currently connected server
-        ns.singularity.connect('home');                                             // Return to home after backdoor
-        log(ns, 'Backdoored: ' + host);
-    } catch (e) {
-        log(ns, 'backdoor: failed on ' + host + ' — ' + e);
-        ns.singularity.connect('home');                                             // Ensure we return home even on error
-    }
-}
-
-/**
  * Scans all servers and attempts root access on each unrooted server.
  * Writes a port 2 event for each newly rooted server.
- * If SF4 is available, backdoors newly rooted hackable servers.
+ * Launches backdoor.js per newly rooted server — it self-exits if SF4 absent.
  * Returns the count of newly rooted servers.
  * @param {NS} ns
  * @returns {Promise<number>} Count of newly rooted servers this pass
  */
 async function attemptRooting(ns) {
-    const servers    = getAllServers(ns);
-    const sf4        = hasSF(ns, 4);                                                // Check SF4 once per pass — wrap is already try/catch
+    const servers = getAllServers(ns);
 
     let alreadyRooted = 0;
     let newlyRooted   = 0;
@@ -173,7 +140,7 @@ async function attemptRooting(ns) {
 
         if (ns.hasRootAccess(host)) {
             alreadyRooted++;
-            continue;                                                               // Already rooted — no action
+            continue;
         }
 
         const success = getRootAccess(ns, host);
@@ -183,9 +150,10 @@ async function attemptRooting(ns) {
             ns.tprint('[AUTO-ROOT] Rooted: ' + host);
             writePort(ns, PORT_AUTOROOT, { host, time: Date.now() });              // Notify orchestrate of new root
 
-            // SF4 auto-backdoor: only hackable servers are useful targets
-            if (sf4 && canHack(ns, host)) {
-                await backdoor(ns, host);
+            // Launch backdoor.js per host — it self-exits if SF4 not owned.
+            // Singularity RAM cost is isolated there; auto-root pays none of it.
+            if (canHack(ns, host)) {
+                ns.exec(BACKDOOR_SCRIPT, 'home', 1, host);
             }
         } else {
             failed++;
@@ -228,7 +196,7 @@ export async function main(ns) {
     ]);
 
     if (flags.help) {
-        ns.tprint('=== auto-root.js v1.0.0 ===');
+        ns.tprint('=== auto-root.js v1.2.0 ===');
         ns.tprint('Purpose: Gains root access on all reachable servers. Optionally');
         ns.tprint('         monitors for new crackers and backdoors servers via SF4.');
         ns.tprint('Usage:   run /scripts/auto-root.js [--watch]');
@@ -240,7 +208,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== auto-root.js v1.0.0 | watch:' + flags.watch + ' ===');
+    ns.tprint('=== auto-root.js v1.2.0 | watch:' + flags.watch + ' ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
