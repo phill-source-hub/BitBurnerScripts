@@ -33,6 +33,7 @@ const BASE_URL = 'https://raw.githubusercontent.com/phill-source-hub/BitBurnerSc
 // --- All scripts to install, in dependency order ---
 const SCRIPTS = [
     'lib-utils.js',
+    'lib-sf-utils.js',
     'worker.js',
     'orchestrate.js',
     'auto-root.js',
@@ -67,7 +68,7 @@ export async function main(ns) {
     }
 
     ns.tprint('=== installer.js v1.0.0 ===');
-    ns.tprint('Downloading ' + SCRIPTS.length + ' scripts from GitHub...');
+    ns.tprint('Downloading ' + SCRIPTS.length + ' scripts from GitHub...');  // 11 scripts
     ns.disableLog('ALL');
 
     let successCount = 0;

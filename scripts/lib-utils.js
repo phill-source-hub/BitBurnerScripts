@@ -1,26 +1,30 @@
 /**
  * lib-utils.js
- * Version: 1.1.0
+ * Version: 1.2.0
  *
  * Shared utility library for PhlanxOS BitBurner automation suite.
  *
  * Behaviour:
  *   Provides all shared helper functions used by orchestrate, auto-root,
  *   buy-servers, upgrade-servers, hacknet-manager, status, and bootstrap.
- *   This is the only shared library in the suite. No logic that is used
- *   by more than one script may live outside this file.
+ *
+ *   SF4 / singularity utilities live in lib-sf-utils.js to isolate their
+ *   RAM cost. Without SF4, singularity functions carry a 16x RAM multiplier —
+ *   keeping them here would bloat every importing script. Only scripts that
+ *   need SF4 behaviour import lib-sf-utils.js.
  *
  *   Functions are grouped by concern:
  *     Logging / formatting  — log, formatTime
- *     Network scanning      — getAllServers, getPath
- *     Root access           — getRootAccess, canHack
+ *     Network scanning      — getAllServers
  *     Server selection      — getWorkerServers, getRankedTargets, isPrepped
  *     RAM / tier            — getRamTier, getScriptRam
- *     Source-File detection — hasSF
  *     Port helpers          — writePort, readPort, clearPort
  *     Money protection      — canAfford
  *
  * Changelog:
+ *   v1.2.0 - Removed hasSF, getRootAccess, getPath — moved to lib-sf-utils.js
+ *            and auto-root.js respectively. Eliminates singularity and cracker
+ *            RAM costs from all scripts that don't need them.
  *   v1.1.0 - canAfford: added optional reserve param. Callers passing reserve
  *            get floor + reserve enforced. Zero-arg callers unchanged.
  *   v1.0.0 - Clean rewrite. All 16 functions. Adds getRamTier, hasSF,
@@ -94,97 +98,14 @@ export function getAllServers(ns, host = 'home', visited = new Set()) {
     return Array.from(visited);                                                     // Return flat array of all found hosts
 }
 
-/**
- * Finds the hop-by-hop path from home to a target server using BFS.
- * Required for ns.singularity.connect() which moves one hop at a time.
- * Returns an empty array if the target is not reachable.
- * @param {NS} ns - Netscript object
- * @param {string} target - Destination hostname
- * @returns {string[]} Ordered array of hostnames from home to target (inclusive)
- */
-export function getPath(ns, target) {
-    const queue   = [['home']];                                                     // BFS queue; each entry is a full path so far
-    const visited = new Set(['home']);                                               // Track visited hosts to avoid cycles
-
-    while (queue.length > 0) {                                                      // Process until queue is empty
-        const path = queue.shift();                                                  // Take the next path to explore
-        const node = path[path.length - 1];                                         // Current host is the last hop in path
-
-        if (node === target) return path;                                            // Found the target — return the complete path
-
-        for (const neighbour of ns.scan(node)) {                                    // Explore direct connections
-            if (!visited.has(neighbour)) {                                          // Skip already-visited hosts
-                visited.add(neighbour);                                             // Mark as visited before enqueuing
-                queue.push(path.concat([neighbour]));                               // Enqueue extended path
-            }
-        }
-    }
-
-    return [];                                                                      // Target unreachable from home
-}
-
-
-// =============================================================================
-// Root Access
-// =============================================================================
-
-/**
- * Checks whether the player's hacking level meets a server's requirement.
- * @param {NS} ns - Netscript object
- * @param {string} host - Target hostname
- * @returns {boolean} True if the player can hack this server
- */
-export function canHack(ns, host) {
-    const required    = ns.getServerRequiredHackingLevel(host);                     // Server's minimum hack level
-    const playerLevel = ns.getHackingLevel();                                       // Player's current hack level
-    return playerLevel >= required;                                                  // True if player meets or exceeds requirement
-}
-
-/**
- * Attempts to gain root access on a target server.
- * Tries every port-cracker program that exists on home, then nukes if enough
- * ports have been opened. Skips crackers not yet owned without error.
- * Checks NUKE.exe is present before attempting to nuke.
- * @param {NS} ns - Netscript object
- * @param {string} host - Target hostname
- * @returns {boolean} True if root access was gained or already existed
- */
-export function getRootAccess(ns, host) {
-    if (ns.hasRootAccess(host)) return true;                                        // Already rooted — nothing to do
-
-    // Map each port-cracker program to its NS function
-    const crackers = [
-        { exe: 'BruteSSH.exe',  fn: () => ns.brutessh(host)  },
-        { exe: 'FTPCrack.exe',  fn: () => ns.ftpcrack(host)  },
-        { exe: 'relaySMTP.exe', fn: () => ns.relaysmtp(host) },
-        { exe: 'HTTPWorm.exe',  fn: () => ns.httpworm(host)   },
-        { exe: 'SQLInject.exe', fn: () => ns.sqlinject(host)  },
-    ];
-
-    let portsOpened = 0;                                                            // Count ports opened this attempt
-    for (const cracker of crackers) {                                               // Try each cracker in turn
-        if (ns.fileExists(cracker.exe, 'home')) {                                   // Only run if we own the program
-            cracker.fn();                                                            // Open the port
-            portsOpened++;                                                          // Track how many we opened
-        }
-    }
-
-    const portsRequired = ns.getServerNumPortsRequired(host);                       // Ports this server needs opened before NUKE
-    if (portsOpened < portsRequired) return false;                                  // Not enough ports — cannot nuke yet
-
-    if (!ns.fileExists('NUKE.exe', 'home')) {                                       // Verify NUKE.exe is present before calling
-        log(ns, 'Cannot nuke ' + host + ': NUKE.exe not found on home');
-        return false;                                                               // Cannot proceed without NUKE.exe
-    }
-
-    ns.nuke(host);                                                                  // Execute NUKE — gains root access
-    return ns.hasRootAccess(host);                                                  // Confirm root was actually granted
-}
-
-
 // =============================================================================
 // Server Selection
 // =============================================================================
+
+// Internal — not exported. Used by getRankedTargets.
+function canHack(ns, host) {
+    return ns.getHackingLevel() >= ns.getServerRequiredHackingLevel(host);
+}
 
 /**
  * Returns all servers suitable for running worker threads.
@@ -288,29 +209,6 @@ export function getRamTier(ns) {
  */
 export function getScriptRam(ns, script) {
     return ns.getScriptRam(script, 'home');                                         // Returns 0 if file not found — safe default
-}
-
-
-// =============================================================================
-// Source-File Detection
-// =============================================================================
-
-/**
- * Detects whether the player has a specific Source-File.
- * Singularity functions require SF4 and throw if called without it.
- * This function wraps the detection in try/catch so callers can safely
- * gate SF-dependent behaviour without crashing.
- * @param {NS} ns - Netscript object
- * @param {number} n - Source-File number to check for (e.g. 4 for SF4)
- * @returns {boolean} True if the player owns Source-File n
- */
-export function hasSF(ns, n) {
-    try {
-        const sourceFiles = ns.singularity.getOwnedSourceFiles();                   // Throws if SF4 not owned
-        return sourceFiles.some(sf => sf.n === n);                                  // Check if target SF is in the list
-    } catch {
-        return false;                                                               // SF4 not available — treat as not owned
-    }
 }
 
 

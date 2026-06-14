@@ -23,6 +23,9 @@
  *   port 2 each cycle without consuming.
  *
  * Changelog:
+ *   v1.1.0 - Imports hasSF + getPath from lib-sf-utils.js (not lib-utils).
+ *            Inlines getAllServers, getRootAccess, canHack to eliminate cracker
+ *            RAM costs from lib-utils and reduce all other scripts' footprints.
  *   v1.0.0 - Initial version. Clean rewrite of v1.4.1 reference.
  *            Adds port 2 write on new roots. Adds SF4 auto-backdoor.
  *
@@ -35,18 +38,19 @@
  *
  * Dependencies:
  *   import { ... } from '/scripts/lib-utils.js';
+ *   import { ... } from '/scripts/lib-sf-utils.js';
  */
 
 import {
-    getAllServers,
-    getRootAccess,
-    canHack,
-    getPath,
-    hasSF,
     writePort,
     clearPort,
     log,
 } from '/scripts/lib-utils.js';
+
+import {
+    hasSF,
+    getPath,
+} from '/scripts/lib-sf-utils.js';
 
 // --- Constants ---
 const WATCH_INTERVAL     = 5 * 60 * 1000;                                          // 5 minutes between watch cycles
@@ -62,6 +66,46 @@ const CRACKERS = [
     'HTTPWorm.exe',
     'SQLInject.exe',
 ];
+
+
+// =============================================================================
+// Inlined network / root helpers (not in lib-utils — cracker fns add RAM cost)
+// =============================================================================
+
+function getAllServers(ns, host = 'home', visited = new Set()) {
+    visited.add(host);
+    for (const n of ns.scan(host)) {
+        if (!visited.has(n)) getAllServers(ns, n, visited);
+    }
+    return Array.from(visited);
+}
+
+function canHack(ns, host) {
+    return ns.getHackingLevel() >= ns.getServerRequiredHackingLevel(host);
+}
+
+function getRootAccess(ns, host) {
+    if (ns.hasRootAccess(host)) return true;
+
+    const crackers = [
+        { exe: 'BruteSSH.exe',  fn: () => ns.brutessh(host)  },
+        { exe: 'FTPCrack.exe',  fn: () => ns.ftpcrack(host)  },
+        { exe: 'relaySMTP.exe', fn: () => ns.relaysmtp(host) },
+        { exe: 'HTTPWorm.exe',  fn: () => ns.httpworm(host)   },
+        { exe: 'SQLInject.exe', fn: () => ns.sqlinject(host)  },
+    ];
+
+    let portsOpened = 0;
+    for (const c of crackers) {
+        if (ns.fileExists(c.exe, 'home')) { c.fn(); portsOpened++; }
+    }
+
+    if (portsOpened < ns.getServerNumPortsRequired(host)) return false;
+    if (!ns.fileExists('NUKE.exe', 'home')) return false;
+
+    ns.nuke(host);
+    return ns.hasRootAccess(host);
+}
 
 
 // =============================================================================
