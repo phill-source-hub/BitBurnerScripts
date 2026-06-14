@@ -1,6 +1,6 @@
 /**
  * bootstrap.js
- * Version: 1.2.0
+ * Version: 1.4.0
  *
  * Post-reset launcher. Detects RAM tier and starts appropriate scripts.
  *
@@ -32,6 +32,10 @@
  *   rooted servers so orchestrate's pool is ready on first cycle.
  *
  * Changelog:
+ *   v1.4.0 - Remove auto-root and buy-servers from launch sequence. Both now
+ *            launched by orchestrate.js after bootstrap exits. On 16GB home,
+ *            bootstrap(~4GB) + orchestrate(~10GB) leaves no room for them.
+ *            Still kills them on startup for clean restart.
  *   v1.3.0 - Strip bootstrap RAM: remove ns.scp (BFS block gone), ns.getScriptRam,
  *            ns.getServerUsedRam. launch() now trusts exec() return value.
  *            auto-root moved to tier 1 (run manually at tier 0).
@@ -83,11 +87,13 @@ const ALL_SCRIPTS = [
     SCRIPT_STATUS,
 ];
 
-// Minimum tier required to launch each script
+// Minimum tier required to launch each script.
+// auto-root and buy-servers are NOT launched here — orchestrate.js owns them.
+// At tier 1 (16GB): bootstrap(~4GB) + orchestrate(~10GB) = 14GB; auto-root(5.4GB)
+// and buy-servers(~2GB) can't fit while bootstrap is resident. Orchestrate launches
+// them after bootstrap exits. They are still killed here for a clean restart.
 const TIER_REQUIREMENTS = {
     [SCRIPT_ORCHESTRATE] : 0,
-    [SCRIPT_AUTO_ROOT]   : 1,                                                        // At tier 0, run auto-root.js manually
-    [SCRIPT_BUY]         : 1,
     [SCRIPT_UPGRADE]     : 2,
     [SCRIPT_HACKNET]     : 2,
     [SCRIPT_STATUS]      : 3,
@@ -138,7 +144,7 @@ export async function main(ns) {
     ]);
 
     if (flags.help) {
-        ns.tprint('=== bootstrap.js v1.3.0 ===');
+        ns.tprint('=== bootstrap.js v1.4.0 ===');
         ns.tprint('Purpose: Kills and relaunches all managed scripts for the detected RAM tier.');
         ns.tprint('Usage:   run /scripts/bootstrap.js [flags]');
         ns.tprint('Flags:');
@@ -155,7 +161,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== bootstrap.js v1.3.0 ===');
+    ns.tprint('=== bootstrap.js v1.4.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -211,14 +217,8 @@ export async function main(ns) {
         ns.tprint('[BOOTSTRAP] SKIP orchestrate — suppressed by --no-orchestrate');
     }
 
-    if (shouldLaunch(SCRIPT_AUTO_ROOT)) {
-        launch(ns, SCRIPT_AUTO_ROOT, ['--watch']);                                  // Always launch in watch mode
-    }
-
-    if (shouldLaunch(SCRIPT_BUY)) {
-        const args = serverReserve > 0 ? ['--reserve', serverReserve] : [];
-        launch(ns, SCRIPT_BUY, args);
-    }
+    // auto-root and buy-servers are launched by orchestrate.js after it starts —
+    // they don't fit alongside bootstrap + orchestrate on 16GB home. See orchestrate.js v1.4.0.
 
     if (shouldLaunch(SCRIPT_UPGRADE)) {
         const args = serverReserve > 0 ? ['--reserve', serverReserve] : [];

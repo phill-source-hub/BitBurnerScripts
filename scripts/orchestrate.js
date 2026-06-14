@@ -1,6 +1,6 @@
 /**
  * orchestrate.js
- * Version: 1.1.0
+ * Version: 1.4.0
  *
  * Tier-aware HWGW batch scheduler and early-game grow/weaken dispatcher.
  *
@@ -32,6 +32,11 @@
  *     Port 1: written each cycle with timing data for status.js.
  *
  * Changelog:
+ *   v1.4.0 - Orchestrate now owns companion launch (auto-root, buy-servers).
+ *            Bootstrap can't launch them at tier 1 (RAM too tight while bootstrap
+ *            is resident). Orchestrate waits 1s for bootstrap to exit, launches
+ *            auto-root (single pass), waits 10s for it to finish, then buy-servers.
+ *            Adds ns.isRunning to prevent duplicate launches on orchestrate restart.
  *   v1.3.0 - Add back scpWorker in runFullMode only. tier 0 logic removed to
  *            orchestrate-t0.js; this file only runs at tier 1+ (16GB home).
  *   v1.2.0 - Inline getRankedTargets, isPrepped, canHack (removed from lib-utils).
@@ -97,8 +102,10 @@ function isPrepped(ns, host) {
     return security <= minSecurity + 1 && money >= maxMoney * 0.99;
 }
 
-// --- Worker script path ---
-const WORKER_SCRIPT = 'scripts/worker.js';                                          // No leading slash — matches ns.exec() resolution
+// --- Script paths ---
+const WORKER_SCRIPT   = 'scripts/worker.js';                                        // No leading slash — matches ns.exec() resolution
+const AUTOROOT_SCRIPT = 'scripts/auto-root.js';                                     // Launched by orchestrate after bootstrap exits (RAM constraint at tier 1)
+const BUY_SCRIPT      = 'scripts/buy-servers.js';                                   // Launched after auto-root single pass exits to free RAM
 
 // --- Timing constants ---
 const LAND_SPACING  = 20;                                                           // ms between each HWGW job landing in sequence
@@ -803,6 +810,23 @@ export async function main(ns) {
     if (tier === 0) {
         await runTier0(ns);
     } else {
+        // Bootstrap holds ~4GB RAM while launching — auto-root (5.4GB) and buy-servers
+        // can't fit alongside orchestrate (~10GB) + bootstrap on 16GB home.
+        // Wait for bootstrap to exit, then launch companions orchestrate owns.
+        await ns.sleep(1000);
+        if (!ns.isRunning(AUTOROOT_SCRIPT, 'home')) {
+            const arPid = ns.exec(AUTOROOT_SCRIPT, 'home', 1);                      // Single pass (no --watch): exits after scan, freeing RAM for buy-servers
+            if (arPid > 0) log(ns, 'Launched auto-root.js (pid ' + arPid + ')');
+            else           log(ns, 'WARNING: auto-root.js launch failed');
+        }
+        // auto-root + orchestrate fills 16GB — buy-servers can't start until auto-root exits.
+        // Single-pass auto-root completes in < 5s; 10s wait is safe.
+        await ns.sleep(10000);
+        if (!ns.isRunning(BUY_SCRIPT, 'home')) {
+            const bsPid = ns.exec(BUY_SCRIPT, 'home', 1);
+            if (bsPid > 0) log(ns, 'Launched buy-servers.js (pid ' + bsPid + ')');
+            else           log(ns, 'WARNING: buy-servers.js launch failed');
+        }
         await runFullMode(ns);
     }
 }

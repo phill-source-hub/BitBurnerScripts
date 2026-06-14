@@ -215,7 +215,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== auto-root.js v1.2.0 | watch:' + flags.watch + ' ===');
+    ns.tprint('=== auto-root.js v1.4.0 | watch:' + flags.watch + ' ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
