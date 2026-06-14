@@ -32,6 +32,10 @@
  *   rooted servers so orchestrate's pool is ready on first cycle.
  *
  * Changelog:
+ *   v1.3.0 - Strip bootstrap RAM: remove ns.scp (BFS block gone), ns.getScriptRam,
+ *            ns.getServerUsedRam. launch() now trusts exec() return value.
+ *            auto-root moved to tier 1 (run manually at tier 0).
+ *            SCP responsibility handed to orchestrate.js runFullMode.
  *   v1.2.0 - Launch orchestrate-t0.js at tier 0, orchestrate.js at tier 1+.
  *            --no-orchestrate suppresses both.
  *   v1.1.0 - Inline ns.getScriptRam (removed from lib-utils). SCP worker.js
@@ -59,9 +63,6 @@ import {
     log,
 } from '/scripts/lib-utils.js';
 
-// --- Worker script distributed to rooted servers before orchestrate starts ---
-const WORKER_SCRIPT = 'scripts/worker.js';
-
 // --- Script paths (no leading slash for ns.exec resolution) ---
 const SCRIPT_ORCHESTRATE    = 'scripts/orchestrate.js';
 const SCRIPT_ORCHESTRATE_T0 = 'scripts/orchestrate-t0.js';
@@ -85,7 +86,7 @@ const ALL_SCRIPTS = [
 // Minimum tier required to launch each script
 const TIER_REQUIREMENTS = {
     [SCRIPT_ORCHESTRATE] : 0,
-    [SCRIPT_AUTO_ROOT]   : 0,
+    [SCRIPT_AUTO_ROOT]   : 1,                                                        // At tier 0, run auto-root.js manually
     [SCRIPT_BUY]         : 1,
     [SCRIPT_UPGRADE]     : 2,
     [SCRIPT_HACKNET]     : 2,
@@ -98,35 +99,21 @@ const TIER_REQUIREMENTS = {
 // =============================================================================
 
 /**
- * Attempts to launch a script on home. Checks script exists (RAM > 0) and
- * that it will fit in available home RAM before calling ns.exec().
+ * Attempts to launch a script on home.
+ * Intentionally avoids ns.getScriptRam and ns.getServerUsedRam to keep
+ * bootstrap RAM low enough to launch orchestrate-t0 at tier 0.
+ * exec() returns 0 on failure (file missing or insufficient RAM).
  * @param {NS} ns
  * @param {string} script - Script path
  * @param {string[]} args - Arguments to pass to script
  * @returns {boolean} True if launched successfully
  */
 function launch(ns, script, args = []) {
-    const scriptRam = ns.getScriptRam(script, 'home');                              // 0 if file not found
-    if (scriptRam === 0) {
-        ns.tprint('[BOOTSTRAP] SKIP ' + script + ' — file not found (run installer.js)');
-        return false;
-    }
-
-    const homeMax  = ns.getServerMaxRam('home');
-    const homeUsed = ns.getServerUsedRam('home');
-    const homeFree = homeMax - homeUsed;
-
-    if (scriptRam > homeFree) {
-        ns.tprint('[BOOTSTRAP] SKIP ' + script + ' — needs ' + scriptRam + 'GB, only ' + homeFree.toFixed(1) + 'GB free');
-        return false;
-    }
-
-    const pid = ns.exec(script, 'home', 1, ...args);                               // Launch with 1 thread on home
+    const pid = ns.exec(script, 'home', 1, ...args);
     if (pid === 0) {
-        ns.tprint('[BOOTSTRAP] FAIL ' + script + ' — exec returned 0 (RAM contention?)');
+        ns.tprint('[BOOTSTRAP] FAIL ' + script + ' — exec returned 0 (file missing or insufficient RAM)');
         return false;
     }
-
     ns.tprint('[BOOTSTRAP] OK   ' + script + ' (pid ' + pid + ')');
     return true;
 }
@@ -151,7 +138,7 @@ export async function main(ns) {
     ]);
 
     if (flags.help) {
-        ns.tprint('=== bootstrap.js v1.2.0 ===');
+        ns.tprint('=== bootstrap.js v1.3.0 ===');
         ns.tprint('Purpose: Kills and relaunches all managed scripts for the detected RAM tier.');
         ns.tprint('Usage:   run /scripts/bootstrap.js [flags]');
         ns.tprint('Flags:');
@@ -168,7 +155,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== bootstrap.js v1.2.0 ===');
+    ns.tprint('=== bootstrap.js v1.3.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -209,25 +196,6 @@ export async function main(ns) {
             return false;
         }
         return true;
-    }
-
-    // --- SCP worker.js to all currently rooted servers ---
-    // orchestrate.js checks ns.fileExists instead of doing SCP itself; we pre-populate
-    // the farm here so the first cycle has a pool ready immediately.
-    ns.tprint('[BOOTSTRAP] Distributing worker.js to rooted servers...');
-    const allHosts = ns.scan('home');
-    const visited  = new Set(['home']);
-    const queue    = [...allHosts];
-    while (queue.length > 0) {
-        const h = queue.shift();
-        if (visited.has(h)) continue;
-        visited.add(h);
-        if (!h.startsWith('cloud-server') && ns.hasRootAccess(h)) {
-            ns.scp(WORKER_SCRIPT, h, 'home');
-        }
-        for (const n of ns.scan(h)) {
-            if (!visited.has(n)) queue.push(n);
-        }
     }
 
     ns.tprint('[BOOTSTRAP] Launching scripts for tier ' + (flags.all ? 'ALL' : tier) + '...');

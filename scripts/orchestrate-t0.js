@@ -18,6 +18,9 @@
  *   well under 4GB. Full HWGW batch maths live in orchestrate.js (tier 1+).
  *
  * Changelog:
+ *   v1.1.0 - Fix handoff: only exit on tier rise, not on worker-server
+ *            availability. orchestrate.js is ~10GB and won't fit on 8GB home
+ *            even when worker servers exist. Stay in t0 mode until home upgrades.
  *   v1.0.0 - Initial version. Extracted from orchestrate.js to isolate
  *            tier-0 logic and avoid paying full HWGW RAM cost at reset.
  *
@@ -80,7 +83,7 @@ export async function main(ns) {
     const flags = ns.flags([['help', false]]);
 
     if (flags.help) {
-        ns.tprint('=== orchestrate-t0.js v1.0.0 ===');
+        ns.tprint('=== orchestrate-t0.js v1.1.0 ===');
         ns.tprint('Purpose: Lightweight tier-0 grow/weaken dispatcher for 8GB home.');
         ns.tprint('         Automatically relaunches orchestrate.js when tier rises or');
         ns.tprint('         worker servers become available.');
@@ -93,7 +96,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== orchestrate-t0.js v1.0.0 | TIER 0 early mode ===');
+    ns.tprint('=== orchestrate-t0.js v1.1.0 | TIER 0 early mode ===');
     ns.disableLog('ALL');
 
     clearPort(ns, PORT_STATUS);
@@ -102,16 +105,11 @@ export async function main(ns) {
     const cycleEnds = {};
 
     while (true) {
-        // Tier rose — hand off to full HWGW orchestrate
+        // Tier rose — hand off to full HWGW orchestrate.
+        // Do NOT hand off on worker-server availability alone: orchestrate.js is
+        // ~10GB and won't fit on 8GB home. Stay in t0 mode until home is upgraded.
         if (getRamTier(ns) > 0) {
             ns.tprint('[T0] Tier risen — launching ' + FULL_SCRIPT);
-            ns.exec(FULL_SCRIPT, 'home', 1);
-            return;
-        }
-
-        // Worker servers available — hand off to full orchestrate
-        if (getWorkerServers(ns).length > 0) {
-            ns.tprint('[T0] Worker servers detected — launching ' + FULL_SCRIPT);
             ns.exec(FULL_SCRIPT, 'home', 1);
             return;
         }
