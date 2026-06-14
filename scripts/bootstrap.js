@@ -1,6 +1,6 @@
 /**
  * bootstrap.js
- * Version: 1.1.0
+ * Version: 1.2.0
  *
  * Post-reset launcher. Detects RAM tier and starts appropriate scripts.
  *
@@ -11,10 +11,15 @@
  *   Flags for reserve amounts are forwarded to the relevant scripts.
  *
  *   Launch order matches build order to respect dependencies:
- *     Tier 0+: orchestrate.js, auto-root.js
- *     Tier 1+: buy-servers.js
+ *     Tier 0:  orchestrate-t0.js, auto-root.js (RAM permitting)
+ *     Tier 1+: orchestrate.js, auto-root.js, buy-servers.js
  *     Tier 2+: upgrade-servers.js, hacknet-manager.js
  *     Tier 3+: status.js
+ *
+ *   Orchestrate variant is chosen by tier:
+ *     Tier 0 → orchestrate-t0.js (~3.5GB, no HWGW batch math)
+ *     Tier 1+ → orchestrate.js (full HWGW, needs 16GB home)
+ *   --no-orchestrate suppresses both variants.
  *
  *   --all overrides tier gating and launches everything regardless.
  *   --no-<script> suppresses a specific script (e.g. --no-status).
@@ -27,6 +32,8 @@
  *   rooted servers so orchestrate's pool is ready on first cycle.
  *
  * Changelog:
+ *   v1.2.0 - Launch orchestrate-t0.js at tier 0, orchestrate.js at tier 1+.
+ *            --no-orchestrate suppresses both.
  *   v1.1.0 - Inline ns.getScriptRam (removed from lib-utils). SCP worker.js
  *            to rooted servers before launching orchestrate.
  *   v1.0.0 - Initial version
@@ -56,7 +63,8 @@ import {
 const WORKER_SCRIPT = 'scripts/worker.js';
 
 // --- Script paths (no leading slash for ns.exec resolution) ---
-const SCRIPT_ORCHESTRATE = 'scripts/orchestrate.js';
+const SCRIPT_ORCHESTRATE    = 'scripts/orchestrate.js';
+const SCRIPT_ORCHESTRATE_T0 = 'scripts/orchestrate-t0.js';
 const SCRIPT_AUTO_ROOT   = 'scripts/auto-root.js';
 const SCRIPT_BUY         = 'scripts/buy-servers.js';
 const SCRIPT_UPGRADE     = 'scripts/upgrade-servers.js';
@@ -66,6 +74,7 @@ const SCRIPT_STATUS      = 'scripts/status.js';
 // All managed scripts — killed on startup before relaunch
 const ALL_SCRIPTS = [
     SCRIPT_ORCHESTRATE,
+    SCRIPT_ORCHESTRATE_T0,
     SCRIPT_AUTO_ROOT,
     SCRIPT_BUY,
     SCRIPT_UPGRADE,
@@ -142,7 +151,7 @@ export async function main(ns) {
     ]);
 
     if (flags.help) {
-        ns.tprint('=== bootstrap.js v1.1.0 ===');
+        ns.tprint('=== bootstrap.js v1.2.0 ===');
         ns.tprint('Purpose: Kills and relaunches all managed scripts for the detected RAM tier.');
         ns.tprint('Usage:   run /scripts/bootstrap.js [flags]');
         ns.tprint('Flags:');
@@ -159,7 +168,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== bootstrap.js v1.1.0 ===');
+    ns.tprint('=== bootstrap.js v1.2.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -225,8 +234,13 @@ export async function main(ns) {
 
     // --- Launch in dependency order ---
 
-    if (shouldLaunch(SCRIPT_ORCHESTRATE)) {
-        launch(ns, SCRIPT_ORCHESTRATE, []);
+    // Orchestrate: tier 0 uses the lightweight t0 variant; tier 1+ uses full HWGW.
+    // --no-orchestrate suppresses both.
+    if (!suppressed.has(SCRIPT_ORCHESTRATE)) {
+        const orchScript = tier === 0 ? SCRIPT_ORCHESTRATE_T0 : SCRIPT_ORCHESTRATE;
+        launch(ns, orchScript, []);
+    } else {
+        ns.tprint('[BOOTSTRAP] SKIP orchestrate — suppressed by --no-orchestrate');
     }
 
     if (shouldLaunch(SCRIPT_AUTO_ROOT)) {

@@ -1,34 +1,38 @@
 /**
  * lib-utils.js
- * Version: 1.3.0
+ * Version: 1.4.0
  *
  * Shared utility library for PhlanxOS BitBurner automation suite.
  *
  * Behaviour:
- *   Provides all shared helper functions used by orchestrate, auto-root,
- *   buy-servers, upgrade-servers, hacknet-manager, status, and bootstrap.
+ *   Provides shared helper functions used by all managed scripts.
+ *   Deliberately kept cheap: every NS function here costs < 0.25GB so
+ *   importing scripts do not pay for expensive analysis calls.
  *
  *   SF4 / singularity utilities live in lib-sf-utils.js to isolate their
- *   RAM cost. Without SF4, singularity functions carry a 16x RAM multiplier —
- *   keeping them here would bloat every importing script. Only scripts that
- *   need SF4 behaviour import lib-sf-utils.js.
+ *   RAM cost. Without SF4, singularity functions carry a 16x RAM multiplier.
  *
  *   Functions are grouped by concern:
  *     Logging / formatting  — log, formatTime
  *     Network scanning      — getAllServers
- *     Server selection      — getWorkerServers, getRankedTargets, isPrepped
+ *     Server selection      — getWorkerServers
  *     RAM / tier            — getRamTier
  *     Port helpers          — writePort, readPort, clearPort
  *
- *   canAfford and getScriptRam are intentionally absent:
- *     canAfford uses ns.getPlayer() which is expensive — inlined in each
- *     spending script so only those scripts pay the cost.
- *     getScriptRam uses ns.getScriptRam() — inlined in bootstrap.js only.
+ *   Intentionally absent (expensive — inlined only where needed):
+ *     getRankedTargets  — uses hackAnalyzeChance + hackAnalyze (~2GB combined).
+ *                         Inlined in orchestrate.js only.
+ *     isPrepped         — uses getServerSecurityLevel, getServerMoneyAvailable.
+ *                         Inlined in orchestrate.js only.
+ *     canAfford         — uses ns.getPlayer(). Inlined in spending scripts.
+ *     getScriptRam      — uses ns.getScriptRam(). Inlined in bootstrap.js.
  *
  * Changelog:
+ *   v1.4.0 - Removed getRankedTargets, isPrepped, canHack (internal).
+ *            hackAnalyzeChance + hackAnalyze were costing every lib-utils
+ *            importer ~2GB. Inlined in orchestrate.js only.
  *   v1.3.0 - Removed canAfford (ns.getPlayer) and getScriptRam (ns.getScriptRam).
- *            Both inlined at call sites. Reduces RAM cost for every lib-utils
- *            importer, most critically orchestrate.js and bootstrap.js.
+ *            Both inlined at call sites.
  *   v1.2.0 - Removed hasSF, getRootAccess, getPath — moved to lib-sf-utils.js
  *            and auto-root.js respectively.
  *   v1.1.0 - canAfford: added optional reserve param.
@@ -103,11 +107,6 @@ export function getAllServers(ns, host = 'home', visited = new Set()) {
 // Server Selection
 // =============================================================================
 
-// Internal — not exported. Used by getRankedTargets.
-function canHack(ns, host) {
-    return ns.getHackingLevel() >= ns.getServerRequiredHackingLevel(host);
-}
-
 /**
  * Returns all servers suitable for running worker threads.
  * Criteria: rooted, not home, maxRam >= WORKER_RAM (1.75GB).
@@ -122,59 +121,6 @@ export function getWorkerServers(ns) {
         .filter(h => ns.hasRootAccess(h))                                           // Must have root to exec scripts
         .filter(h => ns.getServerMaxRam(h) >= WORKER_RAM)                           // Must fit at least one worker thread
         .sort((a, b) => ns.getServerMaxRam(b) - ns.getServerMaxRam(a));            // Largest RAM first
-}
-
-/**
- * Returns all valid hack targets ranked by realistic expected yield.
- *
- * Score = (maxMoney / weakenTime) * hackChance * hackPercent
- *
- *   maxMoney    — theoretical ceiling; more money is better
- *   weakenTime  — proxy for all operation durations; shorter is better
- *   hackChance  — probability the hack succeeds (ns.hackAnalyzeChance, 0–1)
- *   hackPercent — fraction of money stolen per thread per hack (ns.hackAnalyze, 0–1)
- *
- * Excludes: home, purchased cloud servers, unrooted servers, servers the
- * player cannot yet hack, and servers with no money.
- *
- * @param {NS} ns - Netscript object
- * @returns {Array<{host: string, maxMoney: number, weakenTime: number, score: number}>}
- *   Target objects sorted by score descending
- */
-export function getRankedTargets(ns) {
-    return getAllServers(ns)
-        .filter(h => h !== 'home')                                                  // Home is never a hack target
-        .filter(h => !h.startsWith('cloud-server'))                                 // Purchased servers have no money
-        .filter(h => ns.hasRootAccess(h))                                           // Must have root to run workers
-        .filter(h => canHack(ns, h))                                                // Player must meet hack level requirement
-        .filter(h => ns.getServerMaxMoney(h) > 0)                                   // Must have money — some servers have none
-        .map(h => {
-            const maxMoney    = ns.getServerMaxMoney(h);                            // Theoretical max money on server
-            const weakenTime  = ns.getWeakenTime(h);                               // Weaken time — slowest op, used as cycle duration
-            const hackChance  = ns.hackAnalyzeChance(h);                            // Probability hack succeeds at current skill
-            const hackPercent = ns.hackAnalyze(h);                                  // Fraction of money stolen per thread
-            const score       = (maxMoney / weakenTime) * hackChance * hackPercent; // Realistic $/ms yield
-            return { host: h, maxMoney, weakenTime, score };
-        })
-        .sort((a, b) => b.score - a.score);                                         // Best score first
-}
-
-/**
- * Checks whether a target server is fully prepped for HWGW batch hacking.
- * Tight thresholds are required — batch timing calculations assume min security
- * and max money. Drift from these causes desync and reduces yield.
- * @param {NS} ns - Netscript object
- * @param {string} host - Target hostname
- * @returns {boolean} True if server is ready for batch hacking
- */
-export function isPrepped(ns, host) {
-    const security    = ns.getServerSecurityLevel(host);                            // Current security level
-    const minSecurity = ns.getServerMinSecurityLevel(host);                         // Server's minimum possible security
-    const money       = ns.getServerMoneyAvailable(host);                           // Current money on server
-    const maxMoney    = ns.getServerMaxMoney(host);                                 // Server's maximum possible money
-
-    return security <= minSecurity + 1                                              // Security at or near minimum (1.0 tolerance)
-        && money    >= maxMoney    * 0.99;                                          // Money at or near maximum (1% tolerance)
 }
 
 

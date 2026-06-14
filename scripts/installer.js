@@ -35,6 +35,7 @@ const SCRIPTS = [
     'lib-utils.js',
     'lib-sf-utils.js',
     'worker.js',
+    'orchestrate-t0.js',
     'orchestrate.js',
     'auto-root.js',
     'backdoor.js',
@@ -69,7 +70,7 @@ export async function main(ns) {
     }
 
     ns.tprint('=== installer.js v1.0.0 ===');
-    ns.tprint('Downloading ' + SCRIPTS.length + ' scripts from GitHub...');  // 11 scripts
+    ns.tprint('Downloading ' + SCRIPTS.length + ' scripts from GitHub...');  // 13 scripts
     ns.disableLog('ALL');
 
     let successCount = 0;

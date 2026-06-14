@@ -32,6 +32,9 @@
  *     Port 1: written each cycle with timing data for status.js.
  *
  * Changelog:
+ *   v1.2.0 - Inline getRankedTargets, isPrepped, canHack (removed from lib-utils).
+ *            hackAnalyzeChance + hackAnalyze now only cost this script, not all
+ *            lib-utils importers.
  *   v1.1.0 - Remove ns.scp from orchestrate. Worker pre-copied by bootstrap
  *            and auto-root. Pool built via ns.fileExists check instead.
  *   v1.0.0 - Initial version. Clean rewrite of v2.9.1 reference.
@@ -49,9 +52,8 @@
  */
 
 import {
+    getAllServers,
     getWorkerServers,
-    getRankedTargets,
-    isPrepped,
     formatTime,
     getRamTier,
     writePort,
@@ -59,6 +61,39 @@ import {
     clearPort,
     log,
 } from '/scripts/lib-utils.js';
+
+// --- Inlined from lib-utils: these use expensive NS calls (hackAnalyzeChance,
+//     hackAnalyze, growthAnalyze) — isolated here so only orchestrate pays. ---
+
+function canHack(ns, host) {
+    return ns.getHackingLevel() >= ns.getServerRequiredHackingLevel(host);
+}
+
+function getRankedTargets(ns) {
+    return getAllServers(ns)
+        .filter(h => h !== 'home')
+        .filter(h => !h.startsWith('cloud-server'))
+        .filter(h => ns.hasRootAccess(h))
+        .filter(h => canHack(ns, h))
+        .filter(h => ns.getServerMaxMoney(h) > 0)
+        .map(h => {
+            const maxMoney    = ns.getServerMaxMoney(h);
+            const weakenTime  = ns.getWeakenTime(h);
+            const hackChance  = ns.hackAnalyzeChance(h);
+            const hackPercent = ns.hackAnalyze(h);
+            const score       = (maxMoney / weakenTime) * hackChance * hackPercent;
+            return { host: h, maxMoney, weakenTime, score };
+        })
+        .sort((a, b) => b.score - a.score);
+}
+
+function isPrepped(ns, host) {
+    const security    = ns.getServerSecurityLevel(host);
+    const minSecurity = ns.getServerMinSecurityLevel(host);
+    const money       = ns.getServerMoneyAvailable(host);
+    const maxMoney    = ns.getServerMaxMoney(host);
+    return security <= minSecurity + 1 && money >= maxMoney * 0.99;
+}
 
 // --- Worker script path ---
 const WORKER_SCRIPT = 'scripts/worker.js';                                          // No leading slash — matches ns.exec() resolution
@@ -311,7 +346,7 @@ function launchWorkers(ns, operation, allocations, target, delay) {
  * @param {NS} ns
  */
 async function runTier0(ns) {
-    ns.tprint('=== orchestrate.js v1.1.0 | TIER 0 early mode ===');
+    ns.tprint('=== orchestrate.js v1.2.0 | TIER 0 early mode ===');
 
     const selfRam   = ns.getScriptRam('orchestrate.js', 'home');                    // Own RAM cost — excluded from worker budget
     const cycleEnds = {};                                                            // Per-target cycleEnd timestamps
@@ -399,7 +434,7 @@ async function runTier0(ns) {
  * @param {NS} ns
  */
 async function runFullMode(ns) {
-    ns.tprint('=== orchestrate.js v1.1.0 | TIER ' + getRamTier(ns) + ' full HWGW mode ===');
+    ns.tprint('=== orchestrate.js v1.2.0 | TIER ' + getRamTier(ns) + ' full HWGW mode ===');
 
     const cycleEnds  = {};                                                          // host -> expected cycleEnd timestamp
     const hackMode   = new Set();                                                   // Targets that have received HACK batches
@@ -734,7 +769,7 @@ export async function main(ns) {
     const flags = ns.flags([['help', false]]);
 
     if (flags.help) {
-        ns.tprint('=== orchestrate.js v1.1.0 ===');
+        ns.tprint('=== orchestrate.js v1.2.0 ===');
         ns.tprint('Purpose: Tier-aware HWGW batch scheduler. Manages grow/weaken/hack');
         ns.tprint('         workers across all rooted servers to maximise income.');
         ns.tprint('Usage:   run /scripts/orchestrate.js');
