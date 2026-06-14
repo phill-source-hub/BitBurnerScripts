@@ -1,6 +1,6 @@
 /**
  * orchestrate.js
- * Version: 1.0.0
+ * Version: 1.1.0
  *
  * Tier-aware HWGW batch scheduler and early-game grow/weaken dispatcher.
  *
@@ -28,11 +28,12 @@
  *     Cycle-aware sleep: wakes at nearest cycleEnd timestamp.
  *     hackMode Set: targets receiving HACK are never given PREP on top.
  *     activePrepTarget: persists across cycles, prevents mid-prep switching.
- *     SCP: worker.js distributed each cycle to newly discovered servers.
  *     Port 2: peeked each cycle for new root events from auto-root.js.
  *     Port 1: written each cycle with timing data for status.js.
  *
  * Changelog:
+ *   v1.1.0 - Remove ns.scp from orchestrate. Worker pre-copied by bootstrap
+ *            and auto-root. Pool built via ns.fileExists check instead.
  *   v1.0.0 - Initial version. Clean rewrite of v2.9.1 reference.
  *            Single worker.js replaces three-file worker model.
  *
@@ -273,19 +274,6 @@ function calcPrepThreads(ns, target, threadsRemaining) {
 // =============================================================================
 
 /**
- * Copies worker.js to a server. Returns true if copy succeeded.
- * SCP check guards against exec calls on servers without the worker file.
- * @param {NS} ns
- * @param {string} host - Destination server
- * @returns {Promise<boolean>}
- */
-async function scpWorker(ns, host) {
-    const ok = await ns.scp(WORKER_SCRIPT, host, 'home');                           // Copy worker from home to target server
-    if (!ok) log(ns, 'scpWorker: failed to copy to ' + host + ' — server skipped');
-    return ok;
-}
-
-/**
  * Launches one ns.exec() call per allocation entry.
  * Operation and delay are passed as positional args to worker.js.
  * Logs exec failures — these are transient RAM contention and resolve next cycle.
@@ -323,7 +311,7 @@ function launchWorkers(ns, operation, allocations, target, delay) {
  * @param {NS} ns
  */
 async function runTier0(ns) {
-    ns.tprint('=== orchestrate.js v1.0.0 | TIER 0 early mode ===');
+    ns.tprint('=== orchestrate.js v1.1.0 | TIER 0 early mode ===');
 
     const selfRam   = ns.getScriptRam('orchestrate.js', 'home');                    // Own RAM cost — excluded from worker budget
     const cycleEnds = {};                                                            // Per-target cycleEnd timestamps
@@ -411,9 +399,8 @@ async function runTier0(ns) {
  * @param {NS} ns
  */
 async function runFullMode(ns) {
-    ns.tprint('=== orchestrate.js v1.0.0 | TIER ' + getRamTier(ns) + ' full HWGW mode ===');
+    ns.tprint('=== orchestrate.js v1.1.0 | TIER ' + getRamTier(ns) + ' full HWGW mode ===');
 
-    const scpDone    = new Set();                                                   // Servers that have had a successful SCP this session
     const cycleEnds  = {};                                                          // host -> expected cycleEnd timestamp
     const hackMode   = new Set();                                                   // Targets that have received HACK batches
     let activePrepTarget = null;                                                     // Serialised PREP: one target at a time
@@ -437,24 +424,10 @@ async function runFullMode(ns) {
             continue;
         }
 
-        // SCP worker.js to any server not yet confirmed — covers new servers each cycle
-        const scpReady = new Set();
-        for (const host of workerList) {
-            if (scpDone.has(host)) {
-                scpReady.add(host);                                                 // Already copied — mark ready without repeat
-                continue;
-            }
-            const ok = await scpWorker(ns, host);
-            if (ok) {
-                scpDone.add(host);
-                scpReady.add(host);
-            }
-            // SCP failure: server excluded from scpReady — not added to pool
-        }
-
         // Build thread pool from servers with worker.js present
+        // worker.js pre-copied by bootstrap (initial farm) and auto-root (new roots)
         const pool = workerList
-            .filter(host => scpReady.has(host))
+            .filter(host => ns.fileExists(WORKER_SCRIPT, host))
             .map(host => ({
                 host,
                 available: Math.floor(
@@ -761,7 +734,7 @@ export async function main(ns) {
     const flags = ns.flags([['help', false]]);
 
     if (flags.help) {
-        ns.tprint('=== orchestrate.js v1.0.0 ===');
+        ns.tprint('=== orchestrate.js v1.1.0 ===');
         ns.tprint('Purpose: Tier-aware HWGW batch scheduler. Manages grow/weaken/hack');
         ns.tprint('         workers across all rooted servers to maximise income.');
         ns.tprint('Usage:   run /scripts/orchestrate.js');

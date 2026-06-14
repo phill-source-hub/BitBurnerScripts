@@ -1,6 +1,6 @@
 /**
  * lib-utils.js
- * Version: 1.2.0
+ * Version: 1.3.0
  *
  * Shared utility library for PhlanxOS BitBurner automation suite.
  *
@@ -17,18 +17,22 @@
  *     Logging / formatting  — log, formatTime
  *     Network scanning      — getAllServers
  *     Server selection      — getWorkerServers, getRankedTargets, isPrepped
- *     RAM / tier            — getRamTier, getScriptRam
+ *     RAM / tier            — getRamTier
  *     Port helpers          — writePort, readPort, clearPort
- *     Money protection      — canAfford
+ *
+ *   canAfford and getScriptRam are intentionally absent:
+ *     canAfford uses ns.getPlayer() which is expensive — inlined in each
+ *     spending script so only those scripts pay the cost.
+ *     getScriptRam uses ns.getScriptRam() — inlined in bootstrap.js only.
  *
  * Changelog:
+ *   v1.3.0 - Removed canAfford (ns.getPlayer) and getScriptRam (ns.getScriptRam).
+ *            Both inlined at call sites. Reduces RAM cost for every lib-utils
+ *            importer, most critically orchestrate.js and bootstrap.js.
  *   v1.2.0 - Removed hasSF, getRootAccess, getPath — moved to lib-sf-utils.js
- *            and auto-root.js respectively. Eliminates singularity and cracker
- *            RAM costs from all scripts that don't need them.
- *   v1.1.0 - canAfford: added optional reserve param. Callers passing reserve
- *            get floor + reserve enforced. Zero-arg callers unchanged.
- *   v1.0.0 - Clean rewrite. All 16 functions. Adds getRamTier, hasSF,
- *            writePort, readPort, clearPort, canAfford, getScriptRam.
+ *            and auto-root.js respectively.
+ *   v1.1.0 - canAfford: added optional reserve param.
+ *   v1.0.0 - Initial version.
  *
  * Dependencies:
  *   None. This file has no imports.
@@ -40,9 +44,6 @@ const RAM_TIER_0  = 8;                                                          
 const RAM_TIER_1  = 16;                                                             // Home RAM threshold for tier 1
 const RAM_TIER_2  = 32;                                                             // Home RAM threshold for tier 2
 const RAM_TIER_3  = 64;                                                             // Home RAM threshold for tier 3
-
-// --- Money floor constant ---
-const MONEY_FLOOR = 0.10;                                                           // Minimum fraction of balance to retain after any spend
 
 // --- Port sentinel ---
 const PORT_EMPTY  = 'NULL PORT DATA';                                               // Value returned by ns.peek when port is empty
@@ -199,19 +200,6 @@ export function getRamTier(ns) {
     return 0;                                                                       // 8GB: post-reset minimal
 }
 
-/**
- * Returns the RAM cost of a script in GB.
- * Safe to call on scripts that may not exist — returns 0 rather than throwing.
- * Use before ns.exec() to verify a script will fit before trying to launch it.
- * @param {NS} ns - Netscript object
- * @param {string} script - Script path (e.g. '/scripts/worker.js')
- * @returns {number} RAM cost in GB, or 0 if the script does not exist
- */
-export function getScriptRam(ns, script) {
-    return ns.getScriptRam(script, 'home');                                         // Returns 0 if file not found — safe default
-}
-
-
 // =============================================================================
 // Port Helpers
 // =============================================================================
@@ -260,22 +248,3 @@ export function clearPort(ns, port) {
 }
 
 
-// =============================================================================
-// Money Protection
-// =============================================================================
-
-/**
- * Returns true only if spending `cost` would leave the player with at least
- * 10% of their current balance. Enforces the PhlanxOS money floor rule.
- * Any script that spends player money must call this before every spend.
- * Never inline the floor calculation — always use this shared function.
- * @param {NS} ns - Netscript object
- * @param {number} cost - Amount about to be spent
- * @param {number} [reserve=0] - Additional minimum balance to retain beyond the 10% floor
- * @returns {boolean} True if the spend is safe, false if it breaches floor + reserve
- */
-export function canAfford(ns, cost, reserve = 0) {
-    const money = ns.getPlayer().money;                                             // Current player balance
-    const floor = money * MONEY_FLOOR;                                              // 10% of current balance — hard minimum
-    return (money - cost) >= (floor + reserve);                                     // Must clear both floor and caller's reserve
-}

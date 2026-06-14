@@ -34,13 +34,13 @@
 
 import {
     log,
-    canAfford,
     writePort,
     clearPort,
 } from '/scripts/lib-utils.js';
 
 // --- Hacknet caps (not exposed in NS API — hardcoded per BitBurner v3.0.1) ---
-const MAX_LEVEL  = 200;                                                             // Maximum hacknet node level
+const MAX_LEVEL  = 200;
+                                                             // Maximum hacknet node level
 const MAX_RAM    = 64;                                                              // Maximum hacknet node RAM (GB)
 const MAX_CORES  = 16;                                                              // Maximum hacknet node core count
 
@@ -49,6 +49,13 @@ const LOOP_SLEEP = 5000;                                                        
 
 // --- Port ---
 const PORT_HACKNET = 3;                                                             // Port this script owns and writes stats to
+const MONEY_FLOOR  = 0.10;
+
+// Inlined — ns.getPlayer() removed from lib-utils to keep orchestrate RAM low.
+function canAfford(ns, cost, reserve = 0) {
+    const money = ns.getPlayer().money;
+    return (money - cost) >= (money * MONEY_FLOOR + reserve);
+}
 
 
 // =============================================================================

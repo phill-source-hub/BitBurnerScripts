@@ -33,15 +33,21 @@
 
 import {
     log,
-    canAfford,
     writePort,
     clearPort,
 } from '/scripts/lib-utils.js';
 
 // --- Constants ---
-const LOOP_SLEEP   = 5000;                                                          // ms between upgrade cycles
+const LOOP_SLEEP   = 5000;
+const MONEY_FLOOR  = 0.10;                                                          // ms between upgrade cycles
 const PORT_SERVERS = 4;                                                             // Port shared with buy-servers for server events
 // MAX_SERVER_RAM is read from ns.cloud.getRamLimit() at runtime — not hardcoded
+
+// Inlined — ns.getPlayer() removed from lib-utils to keep orchestrate RAM low.
+function canAfford(ns, cost, reserve = 0) {
+    const money = ns.getPlayer().money;
+    return (money - cost) >= (money * MONEY_FLOOR + reserve);
+}
 
 
 // =============================================================================

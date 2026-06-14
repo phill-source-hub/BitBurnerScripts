@@ -1,6 +1,6 @@
 /**
  * auto-root.js
- * Version: 1.0.0
+ * Version: 1.3.0
  *
  * Scans all reachable servers and attempts to gain root access on each.
  *
@@ -23,6 +23,8 @@
  *   port 2 each cycle without consuming.
  *
  * Changelog:
+ *   v1.3.0 - SCP worker.js to newly rooted servers so orchestrate pool is
+ *            ready immediately without waiting for orchestrate's first cycle.
  *   v1.2.0 - Backdoor logic moved to backdoor.js (exec fire-and-forget).
  *            Removes lib-sf-utils.js import — auto-root now pays zero
  *            singularity RAM cost regardless of SF4 ownership.
@@ -53,6 +55,7 @@ const KILL_SETTLE_MS     = 500;                                                 
 const PORT_AUTOROOT      = 2;                                                       // Port this script owns and writes to
 const ORCHESTRATE_SCRIPT = '/scripts/orchestrate.js';                              // Path to orchestrate for relaunch
 const BACKDOOR_SCRIPT    = 'scripts/backdoor.js';                                   // Launched per-host when SF4 available
+const WORKER_SCRIPT      = 'scripts/worker.js';                                     // Copied to newly rooted servers for orchestrate
 
 // All known port-cracker programs
 const CRACKERS = [
@@ -149,6 +152,7 @@ async function attemptRooting(ns) {
             newlyRooted++;
             ns.tprint('[AUTO-ROOT] Rooted: ' + host);
             writePort(ns, PORT_AUTOROOT, { host, time: Date.now() });              // Notify orchestrate of new root
+            ns.scp(WORKER_SCRIPT, host, 'home');                                   // Pre-copy worker so orchestrate pool is ready immediately
 
             // Launch backdoor.js per host — it self-exits if SF4 not owned.
             // Singularity RAM cost is isolated there; auto-root pays none of it.
@@ -196,7 +200,7 @@ export async function main(ns) {
     ]);
 
     if (flags.help) {
-        ns.tprint('=== auto-root.js v1.2.0 ===');
+        ns.tprint('=== auto-root.js v1.3.0 ===');
         ns.tprint('Purpose: Gains root access on all reachable servers. Optionally');
         ns.tprint('         monitors for new crackers and backdoors servers via SF4.');
         ns.tprint('Usage:   run /scripts/auto-root.js [--watch]');

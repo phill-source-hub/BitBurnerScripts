@@ -31,15 +31,22 @@
 
 import {
     log,
-    canAfford,
     writePort,
     clearPort,
 } from '/scripts/lib-utils.js';
 
 // --- Constants ---
-const DEFAULT_RAM    = 8;                                                           // GB — smallest purchasable server RAM
+const DEFAULT_RAM    = 8;
+const MONEY_FLOOR    = 0.10;                                                        // Minimum balance fraction to retain after any spend                                                           // GB — smallest purchasable server RAM
 const LOOP_SLEEP     = 5000;                                                        // ms between purchase attempts when waiting for funds
 const PORT_SERVERS   = 4;                                                           // Port shared with upgrade-servers for server events
+
+
+// Inlined — ns.getPlayer() removed from lib-utils to keep orchestrate RAM low.
+function canAfford(ns, cost, reserve = 0) {
+    const money = ns.getPlayer().money;
+    return (money - cost) >= (money * MONEY_FLOOR + reserve);
+}
 
 
 // =============================================================================
