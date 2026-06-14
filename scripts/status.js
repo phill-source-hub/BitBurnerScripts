@@ -377,7 +377,7 @@ export async function main(ns) {
                 ns.print(
                     '  ' + DIM + '$' + R + ns.format.number(curMoney, '0.0a') + DIM + '/$' + R + ns.format.number(maxMoney, '0.0a') +
                     ' ' + bar(curMoney, maxMoney, 12, GR) + ' ' + GR + moneyPct.toFixed(0) + '%' + R +
-                    '  ' + DIM + 'sec' + R + secCol(delta) + security.toFixed(1) + R + DIM + '/' + R + minSecurity.toFixed(1) + DIM + '+' + R + secCol(delta) + delta.toFixed(1) + R +
+                    '  ' + DIM + 'sec ' + R + secCol(delta) + security.toFixed(1) + R + DIM + '/' + R + minSecurity.toFixed(1) + DIM + ' +' + R + secCol(delta) + delta.toFixed(1) + R +
                     '  ' + CY + 'W:' + tc.weaken + R + ' ' + YE + 'G:' + tc.grow + R + ' ' + RE + 'H:' + tc.hack + R
                 );
             }
@@ -401,9 +401,9 @@ export async function main(ns) {
         section(ns, '  SCRIPTS', WH);
         const badges = scriptHealth.map(s => {
             const name = s.file.replace('scripts/', '').replace('.js', '');
-            if (s.running)  return GR + '[RUN]' + R + WH + name + R;
-            if (s.critical) return RE + '[STP]' + R + WH + name + R;
-            return DIM + '[stp]' + name + R;
+            if (s.running)  return GR + '[RUN]' + R + ' ' + WH + name + R;
+            if (s.critical) return RE + '[STP]' + R + ' ' + WH + name + R;
+            return DIM + '[stp] ' + name + R;
         });
         ns.print('  ' + badges.slice(0, 3).join('  '));
         if (badges.length > 3) ns.print('  ' + badges.slice(3).join('  '));
