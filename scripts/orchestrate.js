@@ -620,7 +620,8 @@ async function runFullMode(ns) {
                             const growAlloc = prep.growThreads > 0 ? allocate(pool, prep.growThreads) : [];
                             if (prep.growThreads > 0 && !growAlloc) {
                                 if (weakenAlloc && weakenAlloc.length > 0) freeAllocation(pool, weakenAlloc);
-                                log(ns, '[PREP] ' + t.host + ' — insufficient RAM for grow');
+                                const poolAfterWeaken = pool.reduce((s, p) => s + p.available, 0);
+                                log(ns, '[PREP] ' + t.host + ' — insufficient RAM for grow | need:' + prep.growThreads + ' pool_remaining:' + poolAfterWeaken + ' total_needed:' + prep.totalThreads + ' budget:' + threadsRemaining);
                             } else {
                                 if (growAlloc && growAlloc.length > 0) applyAllocation(pool, growAlloc);
 
