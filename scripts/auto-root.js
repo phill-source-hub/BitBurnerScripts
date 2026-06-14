@@ -1,6 +1,6 @@
 /**
  * auto-root.js
- * Version: 1.3.0
+ * Version: 1.4.0
  *
  * Scans all reachable servers and attempts to gain root access on each.
  *
@@ -23,6 +23,8 @@
  *   port 2 each cycle without consuming.
  *
  * Changelog:
+ *   v1.4.0 - SCP worker.js to already-rooted servers that are missing it.
+ *            Fixes pool gap when servers were rooted before v1.3.0 was installed.
  *   v1.3.0 - SCP worker.js to newly rooted servers so orchestrate pool is
  *            ready immediately without waiting for orchestrate's first cycle.
  *   v1.2.0 - Backdoor logic moved to backdoor.js (exec fire-and-forget).
@@ -143,6 +145,7 @@ async function attemptRooting(ns) {
 
         if (ns.hasRootAccess(host)) {
             alreadyRooted++;
+            if (!ns.fileExists(WORKER_SCRIPT, host)) ns.scp(WORKER_SCRIPT, host, 'home');
             continue;
         }
 
@@ -200,7 +203,7 @@ export async function main(ns) {
     ]);
 
     if (flags.help) {
-        ns.tprint('=== auto-root.js v1.3.0 ===');
+        ns.tprint('=== auto-root.js v1.4.0 ===');
         ns.tprint('Purpose: Gains root access on all reachable servers. Optionally');
         ns.tprint('         monitors for new crackers and backdoors servers via SF4.');
         ns.tprint('Usage:   run /scripts/auto-root.js [--watch]');
