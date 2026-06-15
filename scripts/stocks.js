@@ -38,6 +38,9 @@
  *   - Live bid re-check immediately before signal sells
  *
  * Changelog:
+ *   v1.9.9 - Cap position at 1% of maxShares per symbol. Selling huge volumes of
+ *            low-priced shares triggers cascading game-engine price-down moves
+ *            (shareTxForMovement threshold), crashing proceeds to near-zero.
  *   v1.9.8 - Cycle-spike guard: skip sell when forecast drops >0.10 in one tick
  *            (market cycle fires; getBidPrice is stale pre-crash while getForecast
  *            is already updated — sellStock uses actual price → guaranteed loss).
@@ -76,7 +79,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.8';
+const VERSION     = '1.9.9';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
@@ -99,6 +102,11 @@ const EST_MIN_TICKS = 10;  // minimum ticks before any buy signal considered
 
 // Price-based emergency stop-loss (backstop when forecast estimate is wrong)
 const PRICE_STOPLOSS_PCT = 0.15;  // sell if bid drops >15% below avgPx
+
+// Maximum share count per position as a fraction of maxShares.
+// Selling too many low-priced shares in one call triggers cascading game-engine
+// price-down moves (shareTxForMovement threshold), crashing proceeds to near-zero.
+const MAX_SHARES_FRAC = 0.01;  // buy at most 1% of maxShares per symbol
 
 // Commission per transaction (entry or exit)
 const COMMISSION = 100e3;
@@ -363,8 +371,9 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, money
             const { sym, ask, longShares, maxShares, forecast } = d;
             const budget          = Math.min(cashLeft, tradeCap);
             const remainingShares = maxShares - longShares;
+            const safeShares      = Math.floor(maxShares * MAX_SHARES_FRAC);
             const affordShares    = Math.floor((budget - COMMISSION) / ask);
-            const sharesToBuy     = Math.min(remainingShares, affordShares);
+            const sharesToBuy     = Math.min(remainingShares, affordShares, safeShares);
 
             if (sharesToBuy <= 0) continue;
             if (sharesToBuy * ask < MIN_POSITION_VALUE) continue;
