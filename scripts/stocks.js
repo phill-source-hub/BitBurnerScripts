@@ -18,11 +18,10 @@
  *     4S Data TIX API:   Use exact forecast from ns.stock.getForecast().
  *                        Mode: 4S
  *
- *   Both EST and 4S modes use identical logic:
- *     forecast > BUY_THRESHOLD  → buy long (highest forecast first)
- *     forecast < SELL_THRESHOLD → sell long (if profitIfSold > 0)
- *     forecast < STOPLOSS       → sell long (stop-loss, ignores P&L)
- *     Price drops > PRICE_STOPLOSS_PCT below avgPx → emergency exit
+ *   4S mode logic:
+ *     forecast > BUY_THRESHOLD  → buy long (highest forecast first, longShares=0 only)
+ *     forecast < SELL_THRESHOLD → sell long (if profitIfSold > MIN_PROFIT)
+ *     Price drops > PRICE_STOPLOSS_PCT below avgPx → emergency exit (unconditional)
  *
  *   Estimated forecast (pre-4S):
  *     Each price tick is an independent Bernoulli trial with probability
@@ -39,6 +38,11 @@
  *   - Live bid re-check immediately before signal sells
  *
  * Changelog:
+ *   v1.9.6 - Remove forecast stop-loss. Market cycle flips forecast 0.69→0.31 in
+ *            one tick while price barely moves — unconditional sell wiped profitable
+ *            positions. Price-based stop-loss (-15%) retained as safety backstop.
+ *   v1.9.5 - Live re-check before signal sells. Raise SELL_THRESHOLD=0.55.
+ *   v1.9.4 - One-entry-per-symbol guard restored for 4S mode.
  *   v1.9.0 - Replace trend mode with estimated forecast (MLE of chc from
  *            up/down tick history). Unified buy/sell logic for EST and 4S.
  *            Remove trend-specific take-profit/stop-loss targets.
@@ -65,13 +69,14 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.5';
+const VERSION     = '1.9.6';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
 const BUY_THRESHOLD  = 0.55;  // forecast above this → buy signal
 const SELL_THRESHOLD = 0.55;  // forecast below this → sell signal (symmetric: exit when edge gone)
-const STOPLOSS       = 0.35;  // forecast below this → sell regardless of P&L
+// STOPLOSS removed — SELL_THRESHOLD=0.55 exits when edge gone; forecast-only stop-loss
+// caused unconditional sells when market cycle flipped forecast 0.69→0.31 in one tick
 
 // Estimated forecast parameters (pre-4S)
 const EST_WINDOW   = 50;  // rolling window of up/down ticks
@@ -250,19 +255,19 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
         const profitIfSold = (bid - longAvgPx) * longShares - 2 * COMMISSION;
         const profitOk     = profitIfSold > MIN_PROFIT;
 
-        // Stop-loss: forecast strongly bearish OR price crashed below safety floor
-        const forecastStopLoss = forecast < STOPLOSS;
-        const priceStopLoss    = longAvgPx > 0 && bid <= longAvgPx * (1 - PRICE_STOPLOSS_PCT);
+        // Price stop-loss: emergency exit if bid drops >PRICE_STOPLOSS_PCT below avgPx.
+        // No forecast stop-loss — with SELL_THRESHOLD=0.55 we already exit when edge is
+        // gone. Forecast can flip 0.69→0.31 in one market cycle tick while price barely
+        // moves; a forecast-based stop-loss would unconditionally sell a profitable position.
+        const priceStopLoss = longAvgPx > 0 && bid <= longAvgPx * (1 - PRICE_STOPLOSS_PCT);
 
-        const shouldSell = (signal === 'sell' && profitOk)
-                        || forecastStopLoss
-                        || priceStopLoss;
+        const shouldSell = (signal === 'sell' && profitOk) || priceStopLoss;
 
         if (!shouldSell) continue;
 
-        // Re-read bid immediately before executing to guard against market tick
-        // firing between check and sell. Stop-loss paths skip this — they must execute.
-        if (!forecastStopLoss && !priceStopLoss) {
+        // Re-read bid immediately before executing to guard against a market tick
+        // firing between the check and sellStock. Price stop-loss executes unconditionally.
+        if (!priceStopLoss) {
             const liveBid          = ns.stock.getBidPrice(sym);
             const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
             if (liveProfitIfSold <= 0) continue;
@@ -277,11 +282,9 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
             cashLeft += proceeds;
             cooldown[sym] = CHURN_COOLDOWN;
 
-            const reason = forecastStopLoss
-                ? 'STOPLOSS f=' + forecast.toFixed(2)
-                : priceStopLoss
+            const reason = priceStopLoss
                 ? 'STOPLOSS -' + (PRICE_STOPLOSS_PCT * 100).toFixed(0) + '%'
-                : 'signal f=' + (forecast !== null ? forecast.toFixed(2) : '?');
+                : 'signal f=' + forecast.toFixed(2);
 
             ns.print('[STOCKS] SELL ' + sym + ' (' + reason + ')' +
                 ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit) +
