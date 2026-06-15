@@ -179,8 +179,8 @@ function gatherData(ns, prev) {
             now: Date.now(),
             income,
         };
-    } catch (_) {
-        // Return previous state on any unexpected NS failure so the UI keeps rendering
+    } catch (err) {
+        ns.tprint('[DASHBOARD] gatherData error: ' + err);
         return prev || null;
     }
 }
