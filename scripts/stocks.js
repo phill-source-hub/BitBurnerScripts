@@ -65,12 +65,12 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.3';
+const VERSION     = '1.9.4';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
 const BUY_THRESHOLD  = 0.55;  // forecast above this → buy signal
-const SELL_THRESHOLD = 0.50;  // forecast below this → sell signal (if profitable)
+const SELL_THRESHOLD = 0.55;  // forecast below this → sell signal (symmetric: exit when edge gone)
 const STOPLOSS       = 0.35;  // forecast below this → sell regardless of P&L
 
 // Estimated forecast parameters (pre-4S)
