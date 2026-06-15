@@ -210,22 +210,25 @@ function collectData(ns) {
 
     let factionData = null;
     try {
-        const sing = ns['singularity'];
-        // Prefer currently-worked faction, fall back to most recently joined
+        const sing   = ns['singularity'];
+        const joined = player.factions || [];
         let fac = null;
         const work = player.currentWork;
         if (work && work.type === 'FACTION') {
             fac = work.factionName;
-        } else {
-            const joined = player.factions || [];
-            if (joined.length > 0) fac = joined[joined.length - 1];
+        } else if (joined.length > 0) {
+            fac = joined[joined.length - 1];
         }
         if (fac) {
             const rep    = sing['getFactionRep'](fac);
             const favour = sing['getFactionFavor'](fac);
             factionData = { name: fac, rep, favour };
+        } else {
+            ns.print('[FACTION] no faction: joined=' + JSON.stringify(joined) + ' work=' + JSON.stringify(work));
         }
-    } catch (_) {}
+    } catch (e) {
+        ns.print('[FACTION] error: ' + e.message);
+    }
 
     // Mutate sharedData in place so React's getData() always reads current values
     sharedData = {
