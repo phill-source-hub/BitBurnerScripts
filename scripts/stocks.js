@@ -55,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.8.2';
+const VERSION   = '1.8.3';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -250,12 +250,16 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
             : takeProfitTrend || stopLossTrend;
 
         if (shouldSell) {
-            // Take-profit: re-read bid immediately before selling — a market tick between
-            // the profitability check and sellStock can wipe the gain entirely.
+            // Re-read bid immediately before selling — a market tick between the
+            // profitability check and sellStock can wipe the gain entirely.
             // Stop-loss paths execute unconditionally (that's the point).
-            if (takeProfitTrend) {
-                const liveBid = ns.stock.getBidPrice(sym);
-                if (liveBid < longAvgPx * (1 + TREND_TAKEPROFIT_PCT)) continue;
+            if (takeProfitTrend || (has4S && signal === 'sell' && profitOk)) {
+                const liveBid          = ns.stock.getBidPrice(sym);
+                const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
+                const stillOk = takeProfitTrend
+                    ? liveBid >= longAvgPx * (1 + TREND_TAKEPROFIT_PCT)
+                    : liveProfitIfSold > MIN_PROFIT_OVER_COMMISSION;
+                if (!stillOk) continue;
             }
             const proceeds = ns.stock.sellStock(sym, longShares);
             if (proceeds > 0) {
