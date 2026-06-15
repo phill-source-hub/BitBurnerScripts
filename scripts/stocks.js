@@ -55,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.7.3';
+const VERSION   = '1.7.4';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -75,7 +75,8 @@ const COMMISSION = 100e3;
 const MIN_PROFIT_OVER_COMMISSION = COMMISSION;
 
 // Trend mode stop-loss: sell if position is down more than this fraction from avg cost
-const TREND_STOPLOSS_PCT = 0.10;
+// Tighter than 4S stop-loss — trend buys near peaks so losses mount quickly
+const TREND_STOPLOSS_PCT = 0.05;
 
 // Maximum fraction of deployable cash to put into any single symbol
 const POSITION_CAP_FRAC = 0.20;
@@ -230,25 +231,17 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
         const profitIfSold   = (bid - longAvgPx) * longShares - 2 * COMMISSION;
         const stopLoss4S     = has4S && forecast < STOPLOSS_4S;
         const stopLossTrend  = !has4S && longAvgPx > 0 && bid < longAvgPx * (1 - TREND_STOPLOSS_PCT);
-        const profitOk       = has4S
-            ? profitIfSold > MIN_PROFIT_OVER_COMMISSION
-            : profitIfSold > 0;
+        const profitOk = profitIfSold > MIN_PROFIT_OVER_COMMISSION;
 
-        const shouldSell = (signal === 'sell' && profitOk)
-                        || stopLoss4S
-                        || stopLossTrend;
+        // Trend mode: only exit via stop-loss. Buying on 4/4 rises lands near local peaks
+        // so positions go underwater quickly — signal sells would require profitOk which
+        // never recovers. Stop-loss at 5% caps drawdown and recycles capital.
+        // 4S mode: exit on signal (forecast-driven) OR 4S stop-loss.
+        const shouldSell = has4S
+            ? (signal === 'sell' && profitOk) || stopLoss4S
+            : stopLossTrend;
 
         if (shouldSell) {
-            // Re-check bid immediately before selling — a market tick may have fired
-            // between our getBidPrice read and now, making profitOk stale.
-            if (!stopLoss4S && !stopLossTrend) {
-                const liveBid          = ns.stock.getBidPrice(sym);
-                const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
-                const liveProfitOk     = has4S
-                    ? liveProfitIfSold > MIN_PROFIT_OVER_COMMISSION
-                    : liveProfitIfSold > 0;
-                if (!liveProfitOk) continue;
-            }
             const proceeds = ns.stock.sellStock(sym, longShares);
             if (proceeds > 0) {
                 const profit = proceeds - longShares * longAvgPx - COMMISSION;
