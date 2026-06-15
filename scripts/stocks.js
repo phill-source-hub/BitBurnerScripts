@@ -27,6 +27,7 @@
  *   on stocks in any single cycle.
  *
  * Changelog:
+ *   v1.3.0 - Add --sell-all flag: liquidate all open long positions and exit.
  *   v1.2.0 - Track session P&L (realised + unrealised). Write stats to port 4
  *            each cycle for dashboard display.
  *   v1.1.0 - Replace bracket notation with direct ns.stock.* calls to fix
@@ -37,6 +38,7 @@
  *   --interval N   Tick interval in seconds (default: 6)
  *   --floor N      Minimum cash fraction to keep liquid (default: 0.30)
  *   --once         Single cycle and exit
+ *   --sell-all     Sell all open long positions and exit (graceful shutdown)
  *
  * Ports:
  *   Writes port 4: { realised, unrealised, positions, buys, sells, mode } each cycle
@@ -49,7 +51,7 @@
  *   + buyStock/sellStock ~0.5 each + access checks ~0.15
  */
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -67,15 +69,48 @@ const COMMISSION = 100e3;
 // Minimum position value to bother entering (covers 2x commission + spread)
 const MIN_POSITION_VALUE = 1e6;
 
+function sellAll(ns) {
+    if (!ns.stock.hasWseAccount() || !ns.stock.hasTixApiAccess()) {
+        ns.tprint('[STOCKS] No WSE/TIX access — nothing to sell.');
+        return;
+    }
+    const symbols = ns.stock.getSymbols();
+    let totalProceeds = 0;
+    let sold = 0;
+    for (const sym of symbols) {
+        const [shares, avgPx] = ns.stock.getPosition(sym);
+        if (shares <= 0) continue;
+        const proceeds = ns.stock.sellStock(sym, shares);
+        const profit   = proceeds - shares * avgPx - COMMISSION;
+        totalProceeds += proceeds;
+        sold++;
+        ns.tprint('[STOCKS] SELL ' + sym + ' | shares:' + shares +
+            ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit));
+    }
+    if (sold === 0) {
+        ns.tprint('[STOCKS] No open positions to sell.');
+    } else {
+        ns.tprint('[STOCKS] Sold ' + sold + ' positions | total proceeds: ' + ns.format.number(totalProceeds));
+    }
+    ns.clearPort(PORT_STOCKS);
+}
+
+
 export async function main(ns) {
     const flags = ns.flags([
         ['interval', 6],
         ['floor',    0.30],
         ['once',     false],
+        ['sell-all', false],
     ]);
 
     ns.disableLog('ALL');
     ns.print('=== stocks.js v' + VERSION + ' | interval=' + flags.interval + 's | floor=' + (flags.floor * 100).toFixed(0) + '% ===');
+
+    if (flags['sell-all']) {
+        sellAll(ns);
+        return;
+    }
 
     const priceHistory = {};
     const MONEY_FLOOR  = flags.floor;
