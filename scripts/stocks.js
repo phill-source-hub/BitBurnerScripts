@@ -27,6 +27,8 @@
  *   on stocks in any single cycle.
  *
  * Changelog:
+ *   v1.4.0 - Gate trading on 4S by default (--trend to opt into trend mode).
+ *            Fix cashAvail not decrementing between buys in same tick.
  *   v1.3.0 - Add --sell-all flag: liquidate all open long positions and exit.
  *   v1.2.0 - Track session P&L (realised + unrealised). Write stats to port 4
  *            each cycle for dashboard display.
@@ -39,6 +41,7 @@
  *   --floor N      Minimum cash fraction to keep liquid (default: 0.30)
  *   --once         Single cycle and exit
  *   --sell-all     Sell all open long positions and exit (graceful shutdown)
+ *   --trend        Enable trend trading even without 4S data (risky, off by default)
  *
  * Ports:
  *   Writes port 4: { realised, unrealised, positions, buys, sells, mode } each cycle
@@ -51,7 +54,7 @@
  *   + buyStock/sellStock ~0.5 each + access checks ~0.15
  */
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -102,6 +105,7 @@ export async function main(ns) {
         ['floor',    0.30],
         ['once',     false],
         ['sell-all', false],
+        ['trend',    false],
     ]);
 
     ns.disableLog('ALL');
@@ -122,8 +126,10 @@ export async function main(ns) {
     ns.clearPort(PORT_STOCKS);
     ns.atExit(() => ns.clearPort(PORT_STOCKS));
 
+    const allowTrend = flags['trend'];
+
     do {
-        tick(ns, priceHistory, MONEY_FLOOR, stats);
+        tick(ns, priceHistory, MONEY_FLOOR, stats, allowTrend);
         if (!flags.once) await ns.sleep(INTERVAL);
     } while (!flags.once);
 }
@@ -133,7 +139,7 @@ export async function main(ns) {
 // Tick
 // =============================================================================
 
-function tick(ns, priceHistory, moneyFloor, stats) {
+function tick(ns, priceHistory, moneyFloor, stats, allowTrend) {
     const hasWSE = ns.stock.hasWseAccount();
     const hasTIX = ns.stock.hasTixApiAccess();
     const has4S  = hasTIX && ns.stock.has4SDataTixApi();
@@ -150,18 +156,26 @@ function tick(ns, priceHistory, moneyFloor, stats) {
         return;
     }
 
-    const symbols   = ns.stock.getSymbols();
-    const player    = ns.getPlayer();
-    const cashAvail = player.money * (1 - moneyFloor);
+    // Without 4S, trend trading is commission-heavy and unreliable.
+    // Only trade on trend signals if explicitly opted in via --trend flag.
+    if (!has4S && !allowTrend) {
+        ns.print('[STOCKS] Waiting for 4S data — trend trading disabled. Use --trend to override.');
+        writePort(ns, { realised: stats.realised, unrealised: 0, positions: 0, buys: stats.buys, sells: stats.sells, mode: 'WAIT_4S' });
+        return;
+    }
+
+    const symbols  = ns.stock.getSymbols();
+    const player   = ns.getPlayer();
+    let   cashLeft = player.money * (1 - moneyFloor);  // decremented per buy to avoid over-investing
 
     let cycleBuys = 0, cycleSells = 0;
     let unrealised = 0;
     let openPositions = 0;
 
     for (const sym of symbols) {
-        const price     = ns.stock.getPrice(sym);
         const ask       = ns.stock.getAskPrice(sym);
         const bid       = ns.stock.getBidPrice(sym);
+        const price     = ns.stock.getPrice(sym);
         const [longShares, longAvgPx, , ] = ns.stock.getPosition(sym);
         const maxShares = ns.stock.getMaxShares(sym);
 
@@ -171,7 +185,7 @@ function tick(ns, priceHistory, moneyFloor, stats) {
             openPositions++;
         }
 
-        // Update price history
+        // Update price history (used for trend signal even in 4S mode — harmless)
         if (!priceHistory[sym]) priceHistory[sym] = [];
         priceHistory[sym].push(price);
         if (priceHistory[sym].length > TREND_WINDOW) priceHistory[sym].shift();
@@ -188,6 +202,7 @@ function tick(ns, priceHistory, moneyFloor, stats) {
                 stats.realised += profit;
                 stats.sells++;
                 cycleSells++;
+                cashLeft += proceeds;  // freed cash available for new buys this tick
                 ns.print('[STOCKS] SELL ' + sym + ' | shares:' + longShares +
                     ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit) +
                     ' | session:' + (stats.realised >= 0 ? '+' : '') + ns.format.number(stats.realised));
@@ -195,11 +210,11 @@ function tick(ns, priceHistory, moneyFloor, stats) {
         }
 
         // --- Buy long position ---
-        if (signal === 'buy') {
+        if (signal === 'buy' && cashLeft > COMMISSION) {
             if (longShares >= maxShares) continue;
 
             const remainingShares = maxShares - longShares;
-            const affordShares    = Math.floor((cashAvail - COMMISSION) / ask);
+            const affordShares    = Math.floor((cashLeft - COMMISSION) / ask);
             const sharesToBuy     = Math.min(remainingShares, affordShares);
 
             if (sharesToBuy <= 0) continue;
@@ -209,6 +224,7 @@ function tick(ns, priceHistory, moneyFloor, stats) {
 
             const cost = ns.stock.buyStock(sym, sharesToBuy);
             if (cost > 0) {
+                cashLeft -= cost;  // reduce available cash so later buys respect the floor
                 stats.buys++;
                 cycleBuys++;
                 ns.print('[STOCKS] BUY  ' + sym + ' | shares:' + sharesToBuy +
