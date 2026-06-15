@@ -338,7 +338,7 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, money
             if (sharesToBuy <= 0) continue;
             if (sharesToBuy * ask < MIN_POSITION_VALUE) continue;
 
-            const totalCost = ns.stock.getPurchaseCost(sym, sharesToBuy, 'Long');
+            const totalCost = ns.stock.getPurchaseCost(sym, sharesToBuy, 'L');
             const bidPx     = ns.stock.buyStock(sym, sharesToBuy);  // ask price per share; 0 on failure
             if (bidPx > 0) {
                 cashLeft -= totalCost;
