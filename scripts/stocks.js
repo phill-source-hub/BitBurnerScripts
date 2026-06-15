@@ -38,6 +38,11 @@
  *   - Live bid re-check immediately before signal sells
  *
  * Changelog:
+ *   v1.9.11 - Fix profit formula: sellStock returns bidPrice PER SHARE not total
+ *             proceeds. Was: proceeds - shares×avgPx. Now: (proceeds-avgPx)×shares.
+ *             All prior session P&L logs were wrong (hugely negative). Actual
+ *             money in player account was always correct — only logs were broken.
+ *             Also fix cashLeft budget tracking: use getPurchaseCost for true cost.
  *   v1.9.10 - MIN_PROFIT = 0: sell on any net profit after both commissions.
  *             Previous £100k surplus forced 15% gain on minimum positions;
  *             large positions already clear it trivially. Commission still fully
@@ -83,7 +88,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.10';
+const VERSION     = '1.9.11';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
@@ -108,8 +113,8 @@ const EST_MIN_TICKS = 10;  // minimum ticks before any buy signal considered
 const PRICE_STOPLOSS_PCT = 0.15;  // sell if bid drops >15% below avgPx
 
 // Maximum share count per position as a fraction of maxShares.
-// Selling too many low-priced shares in one call triggers cascading game-engine
-// price-down moves (shareTxForMovement threshold), crashing proceeds to near-zero.
+// Large sell volumes push forecast toward neutral (via shareTxForMovement) but
+// do NOT move price. Cap keeps positions at a reasonable market-depth fraction.
 const MAX_SHARES_FRAC = 0.01;  // buy at most 1% of maxShares per symbol
 
 // Commission per transaction (entry or exit)
@@ -148,9 +153,9 @@ function sellAll(ns) {
     for (const sym of symbols) {
         const [shares, avgPx] = ns.stock.getPosition(sym);
         if (shares <= 0) continue;
-        const proceeds = ns.stock.sellStock(sym, shares);
-        const profit   = proceeds - shares * avgPx - COMMISSION;
-        totalProceeds += proceeds;
+        const proceeds = ns.stock.sellStock(sym, shares);  // returns bidPrice per share
+        const profit   = (proceeds - avgPx) * shares - COMMISSION;
+        totalProceeds += proceeds * shares;
         sold++;
         ns.tprint('[STOCKS] SELL ' + sym + ' | shares:' + shares +
             ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit));
@@ -273,9 +278,9 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, money
         if (d.longShares <= 0) continue;
         if (ownedByUs.has(d.sym)) continue; // bought this session — safe
         // Legacy position: sell unconditionally and log the real P&L
-        const proceeds = ns.stock.sellStock(d.sym, d.longShares);
+        const proceeds = ns.stock.sellStock(d.sym, d.longShares);  // bidPrice per share
         if (proceeds > 0) {
-            const profit = proceeds - d.longShares * d.longAvgPx - COMMISSION;
+            const profit = (proceeds - d.longAvgPx) * d.longShares - COMMISSION;
             stats.realised += profit;
             stats.sells++;
             ns.print('[STOCKS] SELL ' + d.sym + ' (LEGACY FLUSH)' +
@@ -338,9 +343,9 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, money
             if (liveProfitIfSold <= 0) continue;
         }
 
-        const proceeds = ns.stock.sellStock(sym, currentShares);
+        const proceeds = ns.stock.sellStock(sym, currentShares);  // bidPrice per share
         if (proceeds > 0) {
-            const profit = proceeds - currentShares * currentAvgPx - COMMISSION;
+            const profit = (proceeds - currentAvgPx) * currentShares - COMMISSION;
             stats.realised += profit;
             stats.sells++;
             cycleSells++;
@@ -384,9 +389,10 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, money
             if (sharesToBuy <= 0) continue;
             if (sharesToBuy * ask < MIN_POSITION_VALUE) continue;
 
-            const cost = ns.stock.buyStock(sym, sharesToBuy);
+            const totalCost = ns.stock.getPurchaseCost(sym, sharesToBuy, 'Long');
+            const cost      = ns.stock.buyStock(sym, sharesToBuy);  // askPrice per share; 0 on failure
             if (cost > 0) {
-                cashLeft -= cost;
+                cashLeft -= totalCost;
                 stats.buys++;
                 cycleBuys++;
                 ownedByUs.add(sym);
