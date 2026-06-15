@@ -57,7 +57,7 @@
  *   Singularity calls use bracket notation — not counted by static scanner.
  */
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const LOOP_INTERVAL = 60 * 1000;                                                    // ms between cycles
 
 // Fraction of current money we're willing to spend on home RAM per cycle
@@ -690,7 +690,8 @@ function installAugs(ns) {
 // =============================================================================
 
 function reportStatus(ns, sing) {
-    const factions = ns.getPlayer().factions;
+    const player   = ns.getPlayer();
+    const factions = player.factions;
 
     let totalPurchasable = 0;
     let totalOwned       = 0;
@@ -718,6 +719,19 @@ function reportStatus(ns, sing) {
 
     ns.print('[STATUS] Augs owned/queued: ' + totalOwned + ' | Purchasable now: ' + totalPurchasable + ' | Need more rep: ' + missingRep);
     ns.print('[STATUS] Home RAM: ' + ns.getServerMaxRam('home') + 'GB | Factions joined: ' + factions.length);
+
+    // Write current faction data to port 5 for dashboard
+    try {
+        const work = player.currentWork;
+        const fac  = (work && work.factionName) ? work.factionName
+                   : factions.length > 0 ? factions[factions.length - 1] : null;
+        if (fac) {
+            const rep    = sing['getFactionRep'](fac);
+            const favour = sing['getFactionFavor'](fac);
+            ns.clearPort(5);
+            ns.writePort(5, JSON.stringify({ faction: fac, rep, favour }));
+        }
+    } catch (_) {}
 }
 
 

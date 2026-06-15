@@ -208,15 +208,22 @@ function collectData(ns) {
     let income = [0, 0];
     try { income = ns.getTotalScriptIncome(); } catch (_) {}
 
+    // Faction name from player object — no singularity API needed.
+    // Rep + favour come from port 5 (written by singularity.js each cycle).
     let factionData = null;
-    ns.print('[FACTION] diag: factions=' + JSON.stringify(player.factions || []) + ' work=' + JSON.stringify(player.currentWork));
-    try { ns.print('[FACTION] sing type=' + typeof ns['singularity']); } catch(e) { ns.print('[FACTION] sing access threw'); }
-    try { ns.print('[FACTION] getFactionRep type=' + typeof ns['singularity']['getFactionRep']); } catch(e) { ns.print('[FACTION] getFactionRep access threw'); }
     const joined = player.factions || [];
-    const fac = joined.length > 0 ? joined[joined.length - 1] : null;
-    if (fac) {
-        try { const rep = ns['singularity']['getFactionRep'](fac);    ns.print('[FACTION] rep=' + rep); } catch(e) { ns.print('[FACTION] getFactionRep call threw: ' + String(e)); }
-        try { const fav = ns['singularity']['getFactionFavor'](fac);  ns.print('[FACTION] fav=' + fav); } catch(e) { ns.print('[FACTION] getFactionFavor call threw: ' + String(e)); }
+    if (joined.length > 0) {
+        const work = player.currentWork;
+        const fac  = (work && work.factionName) ? work.factionName : joined[joined.length - 1];
+        let rep = null, favour = null;
+        try {
+            const p5Raw = ns.peek(5);
+            if (p5Raw !== 'NULL PORT DATA') {
+                const p5 = JSON.parse(p5Raw);
+                if (p5 && p5.faction === fac) { rep = p5.rep; favour = p5.favour; }
+            }
+        } catch (_) {}
+        factionData = { name: fac, rep, favour };
     }
 
     // Mutate sharedData in place so React's getData() always reads current values
@@ -325,8 +332,8 @@ function renderFaction(d) {
         },
     }, [
         e('span', { key: 'n', style: { color: C.purple, fontWeight: 'bold', minWidth: '100px' } }, fd.name),
-        statChip('rep',    fmtNum(fd.rep,    0), C.blue),
-        statChip('favour', Math.floor(fd.favour), C.cyan),
+        statChip('rep',    fd.rep    !== null ? fmtNum(fd.rep, 0)      : '—', C.blue),
+        statChip('favour', fd.favour !== null ? Math.floor(fd.favour)  : '—', C.cyan),
     ]);
 }
 
