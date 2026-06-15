@@ -25,6 +25,7 @@
  *     Bladeburner — rank, current action
  *
  * Changelog:
+ *   v1.7.0 - Stocks section: realised/unrealised/total P&L from port 4 (stocks.js).
  *   v1.6.0 - Faction section (current faction, rep, favour via singularity API).
  *            LOG button per active script: queues tail open via cmdQueue.
  *            HWGW: show all 5 targets with mode + thread counts (H/WH/G/WG).
@@ -56,7 +57,7 @@
  * RAM: ~4.5 GB
  */
 
-const VERSION    = '1.6.0';
+const VERSION    = '1.7.0';
 const POLL_MS    = 2000;
 const STALE_MS   = 2 * 60 * 1000;
 const TIER_MIN   = 2;
@@ -137,7 +138,7 @@ const INIT_DATA = {
     sharePow: 1, hwgwData: null, hacknetData: null, stale: true,
     farmMax: 0, farmUsed: 0, farmCount: 0, farmLimit: 0,
     targets: {}, cycleStart: 0, corpData: null, bbData: null,
-    now: Date.now(), income: [0, 0], factionData: null,
+    now: Date.now(), income: [0, 0], factionData: null, stockData: null,
 };
 
 // Single shared reference; main() mutates this each poll cycle.
@@ -171,6 +172,9 @@ function collectData(ns) {
 
     const p3Raw       = ns.peek(3);
     const hacknetData = (p3Raw === 'NULL PORT DATA') ? null : safeParse(p3Raw);
+
+    const p4Raw    = ns.peek(4);
+    const stockData = (p4Raw === 'NULL PORT DATA') ? null : safeParse(p4Raw);
 
     let farmMax = 0, farmUsed = 0, farmCount = 0, farmLimit = 0;
     try {
@@ -232,7 +236,7 @@ function collectData(ns) {
         sharePow, hwgwData, hacknetData, stale,
         farmMax, farmUsed, farmCount, farmLimit,
         targets, cycleStart, corpData, bbData,
-        now: Date.now(), income, factionData,
+        now: Date.now(), income, factionData, stockData,
     };
 }
 
@@ -274,6 +278,7 @@ function Dashboard(props) {
         renderScripts(d),
         renderHWGW(d),
         renderHacknet(d),
+        renderStocks(d),
         renderShare(d),
         d.corpData ? renderCorp(d)        : null,
         d.bbData   ? renderBladeburner(d) : null,
@@ -562,6 +567,41 @@ function renderShare(d) {
         sectionHead('SHARE'),
         e('span', { key: 'p', style: { color: col } }, pow.toFixed(3) + 'x'),
         e('span', { key: 's', style: { color: C.dim } }, pctStr),
+    ]);
+}
+
+
+// =============================================================================
+// Stocks
+// =============================================================================
+
+function renderStocks(d) {
+    var sd = d.stockData;
+    if (!sd) return null;
+    if (sd.mode === 'NO_WSE' || sd.mode === 'NO_TIX') return null;
+
+    var realisedCol   = sd.realised   >= 0 ? C.green : C.red;
+    var unrealisedCol = sd.unrealised >= 0 ? C.green : C.red;
+    var realisedStr   = (sd.realised   >= 0 ? '+' : '') + fmtMoney(sd.realised,   2);
+    var unrealisedStr = (sd.unrealised >= 0 ? '+' : '') + fmtMoney(sd.unrealised, 2);
+
+    return e('div', { key: 'stocks', style: panel() }, [
+        sectionHead('STOCKS  ' + sd.mode + '  ' + sd.buys + 'B/' + sd.sells + 'S  open:' + sd.positions),
+        e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
+            e('span', { key: 'r' }, [
+                e('span', { key: 'l', style: { color: C.dim } }, 'realised '),
+                e('span', { key: 'v', style: { color: realisedCol } }, realisedStr),
+            ]),
+            e('span', { key: 'u' }, [
+                e('span', { key: 'l', style: { color: C.dim } }, 'unrealised '),
+                e('span', { key: 'v', style: { color: unrealisedCol } }, unrealisedStr),
+            ]),
+            e('span', { key: 't' }, [
+                e('span', { key: 'l', style: { color: C.dim } }, 'total '),
+                e('span', { key: 'v', style: { color: (sd.realised + sd.unrealised) >= 0 ? C.green : C.red } },
+                    ((sd.realised + sd.unrealised) >= 0 ? '+' : '') + fmtMoney(sd.realised + sd.unrealised, 2)),
+            ]),
+        ]),
     ]);
 }
 

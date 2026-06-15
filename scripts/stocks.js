@@ -1,6 +1,6 @@
 /**
  * stocks.js
- * Version: 1.0.0
+ * Version: 1.2.0
  *
  * Progressive stock market trading automation.
  *
@@ -26,16 +26,20 @@
  *   Money floor: never spend more than (1 - MONEY_FLOOR) of liquid money
  *   on stocks in any single cycle.
  *
- * No external gate. WSE/TIX/4S access checks are runtime, not static.
- * Script costs ~2GB. Safe to run from day 1 (sleeps harmlessly until WSE purchased).
- *
  * Changelog:
+ *   v1.2.0 - Track session P&L (realised + unrealised). Write stats to port 4
+ *            each cycle for dashboard display.
+ *   v1.1.0 - Replace bracket notation with direct ns.stock.* calls to fix
+ *            dynamic RAM overflow crash.
  *   v1.0.0 - Initial version.
  *
  * Flags:
  *   --interval N   Tick interval in seconds (default: 6)
  *   --floor N      Minimum cash fraction to keep liquid (default: 0.30)
  *   --once         Single cycle and exit
+ *
+ * Ports:
+ *   Writes port 4: { realised, unrealised, positions, buys, sells, mode } each cycle
  *
  * Dependencies:
  *   None. Standalone — no imports.
@@ -45,16 +49,17 @@
  *   + buyStock/sellStock ~0.5 each + access checks ~0.15
  */
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
+const PORT_STOCKS = 4;
 
 // 4S trading thresholds
-const BUY_THRESHOLD  = 0.55;                                                        // Forecast > this → buy long
-const SELL_THRESHOLD = 0.50;                                                        // Forecast < this → sell long
+const BUY_THRESHOLD  = 0.55;
+const SELL_THRESHOLD = 0.50;
 
 // Trend-tracking (no 4S) parameters
-const TREND_WINDOW   = 5;                                                           // Price history ticks to track
-const TREND_UP_MIN   = 4;                                                           // Consecutive rises required to go long
-const TREND_DOWN_MIN = 3;                                                           // Consecutive falls to sell
+const TREND_WINDOW   = 5;
+const TREND_UP_MIN   = 4;
+const TREND_DOWN_MIN = 3;
 
 // Commission per transaction
 const COMMISSION = 100e3;
@@ -72,12 +77,18 @@ export async function main(ns) {
     ns.disableLog('ALL');
     ns.print('=== stocks.js v' + VERSION + ' | interval=' + flags.interval + 's | floor=' + (flags.floor * 100).toFixed(0) + '% ===');
 
-    const priceHistory = {};                                                        // symbol → number[] (ring buffer of recent prices)
+    const priceHistory = {};
     const MONEY_FLOOR  = flags.floor;
     const INTERVAL     = flags.interval * 1000;
 
+    // Session accumulators — reset on script restart
+    const stats = { realised: 0, buys: 0, sells: 0 };
+
+    ns.clearPort(PORT_STOCKS);
+    ns.atExit(() => ns.clearPort(PORT_STOCKS));
+
     do {
-        tick(ns, priceHistory, MONEY_FLOOR);
+        tick(ns, priceHistory, MONEY_FLOOR, stats);
         if (!flags.once) await ns.sleep(INTERVAL);
     } while (!flags.once);
 }
@@ -87,19 +98,20 @@ export async function main(ns) {
 // Tick
 // =============================================================================
 
-function tick(ns, priceHistory, moneyFloor) {
-    // --- Access detection (direct calls so static scanner allocates RAM) ---
+function tick(ns, priceHistory, moneyFloor, stats) {
     const hasWSE = ns.stock.hasWseAccount();
     const hasTIX = ns.stock.hasTixApiAccess();
     const has4S  = hasTIX && ns.stock.has4SDataTixApi();
 
     if (!hasWSE) {
         ns.print('[STOCKS] No WSE account. Purchase at World Stock Exchange for ~$200M.');
+        writePort(ns, { realised: 0, unrealised: 0, positions: 0, buys: 0, sells: 0, mode: 'NO_WSE' });
         return;
     }
 
     if (!hasTIX) {
         ns.print('[STOCKS] WSE active but no TIX API. Purchase TIX API for $5B to enable trading.');
+        writePort(ns, { realised: 0, unrealised: 0, positions: 0, buys: 0, sells: 0, mode: 'NO_TIX' });
         return;
     }
 
@@ -107,7 +119,9 @@ function tick(ns, priceHistory, moneyFloor) {
     const player    = ns.getPlayer();
     const cashAvail = player.money * (1 - moneyFloor);
 
-    let bought = 0, sold = 0, totalGain = 0;
+    let cycleBuys = 0, cycleSells = 0;
+    let unrealised = 0;
+    let openPositions = 0;
 
     for (const sym of symbols) {
         const price     = ns.stock.getPrice(sym);
@@ -115,6 +129,12 @@ function tick(ns, priceHistory, moneyFloor) {
         const bid       = ns.stock.getBidPrice(sym);
         const [longShares, longAvgPx, , ] = ns.stock.getPosition(sym);
         const maxShares = ns.stock.getMaxShares(sym);
+
+        // Accumulate unrealised P&L across open positions
+        if (longShares > 0) {
+            unrealised += (bid - longAvgPx) * longShares - COMMISSION;
+            openPositions++;
+        }
 
         // Update price history
         if (!priceHistory[sym]) priceHistory[sym] = [];
@@ -127,11 +147,15 @@ function tick(ns, priceHistory, moneyFloor) {
 
         // --- Sell existing long position ---
         if (longShares > 0 && signal === 'sell') {
-            const gain = ns.stock.sellStock(sym, longShares);
-            if (gain > 0) {
-                totalGain += gain - longShares * longAvgPx - COMMISSION;
-                sold++;
-                ns.print('[STOCKS] SELL ' + sym + ' | shares:' + longShares + ' | gain:$' + ns.format.number(gain));
+            const proceeds = ns.stock.sellStock(sym, longShares);
+            if (proceeds > 0) {
+                const profit = proceeds - longShares * longAvgPx - COMMISSION;
+                stats.realised += profit;
+                stats.sells++;
+                cycleSells++;
+                ns.print('[STOCKS] SELL ' + sym + ' | shares:' + longShares +
+                    ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit) +
+                    ' | session:' + (stats.realised >= 0 ? '+' : '') + ns.format.number(stats.realised));
             }
         }
 
@@ -150,17 +174,39 @@ function tick(ns, priceHistory, moneyFloor) {
 
             const cost = ns.stock.buyStock(sym, sharesToBuy);
             if (cost > 0) {
-                bought++;
-                ns.print('[STOCKS] BUY  ' + sym + ' | shares:' + sharesToBuy + ' | cost:$' + ns.format.number(cost) + ' | ' + (has4S ? 'forecast' : 'trend'));
+                stats.buys++;
+                cycleBuys++;
+                ns.print('[STOCKS] BUY  ' + sym + ' | shares:' + sharesToBuy +
+                    ' | cost:' + ns.format.number(cost) + ' | ' + (has4S ? 'forecast' : 'trend'));
             }
         }
     }
 
-    if (bought > 0 || sold > 0) {
-        ns.print('[STOCKS] Cycle: ' + bought + ' buys, ' + sold + ' sells | net gain est: $' + ns.format.number(totalGain));
+    if (cycleBuys > 0 || cycleSells > 0) {
+        ns.print('[STOCKS] Cycle: ' + cycleBuys + ' buys, ' + cycleSells + ' sells');
     } else {
-        ns.print('[STOCKS] Cycle: no trades | mode: ' + (has4S ? '4S' : 'trend'));
+        ns.print('[STOCKS] Cycle: no trades | mode:' + (has4S ? '4S' : 'trend') +
+            ' | open:' + openPositions + ' | unrealised:' + (unrealised >= 0 ? '+' : '') + ns.format.number(unrealised));
     }
+
+    writePort(ns, {
+        realised:    stats.realised,
+        unrealised,
+        positions:   openPositions,
+        buys:        stats.buys,
+        sells:       stats.sells,
+        mode:        has4S ? '4S' : 'TREND',
+    });
+}
+
+
+// =============================================================================
+// Port write
+// =============================================================================
+
+function writePort(ns, data) {
+    ns.clearPort(PORT_STOCKS);
+    ns.writePort(PORT_STOCKS, JSON.stringify(data));
 }
 
 
@@ -168,10 +214,6 @@ function tick(ns, priceHistory, moneyFloor) {
 // Signal generators
 // =============================================================================
 
-/**
- * 4S signal: buy when forecast > BUY_THRESHOLD, sell when < SELL_THRESHOLD.
- * @returns {'buy'|'sell'|'hold'}
- */
 function get4SSignal(ns, sym) {
     const forecast = ns.stock.getForecast(sym);
     if (forecast > BUY_THRESHOLD)  return 'buy';
@@ -179,11 +221,6 @@ function get4SSignal(ns, sym) {
     return 'hold';
 }
 
-/**
- * Trend signal: track consecutive price direction.
- * Requires TREND_WINDOW ticks of history.
- * @returns {'buy'|'sell'|'hold'}
- */
 function getTrendSignal(history) {
     if (history.length < TREND_WINDOW) return 'hold';
 
