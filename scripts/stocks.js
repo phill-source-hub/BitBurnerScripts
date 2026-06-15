@@ -38,6 +38,10 @@
  *   - Live bid re-check immediately before signal sells
  *
  * Changelog:
+ *   v1.9.10 - MIN_PROFIT = 0: sell on any net profit after both commissions.
+ *             Previous £100k surplus forced 15% gain on minimum positions;
+ *             large positions already clear it trivially. Commission still fully
+ *             deducted in profitIfSold — loss protection preserved.
  *   v1.9.9 - Cap position at 1% of maxShares per symbol. Selling huge volumes of
  *            low-priced shares triggers cascading game-engine price-down moves
  *            (shareTxForMovement threshold), crashing proceeds to near-zero.
@@ -79,7 +83,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.9';
+const VERSION     = '1.9.10';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
@@ -111,8 +115,10 @@ const MAX_SHARES_FRAC = 0.01;  // buy at most 1% of maxShares per symbol
 // Commission per transaction (entry or exit)
 const COMMISSION = 100e3;
 
-// Minimum net profit required for signal-driven sells (covers both commissions)
-const MIN_PROFIT = COMMISSION;
+// Minimum net profit required for signal-driven sells.
+// profitIfSold already deducts both entry and exit commissions, so > 0 means
+// genuinely in profit. Small surplus on small positions, irrelevant on large ones.
+const MIN_PROFIT = 0;
 
 // Maximum spend per single trade: 2% of total account balance
 const TRADE_CAP_FRAC = 0.02;
