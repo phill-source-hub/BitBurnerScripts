@@ -1,6 +1,6 @@
 /**
  * stocks.js
- * Version: 1.6.0
+ * Version: 1.9.0
  *
  * Progressive stock market trading automation.
  *
@@ -10,33 +10,44 @@
  *   as access is purchased — no restart needed.
  *
  *   Access tiers (checked each cycle):
- *     No WSE account:         Report cost to purchase WSE. Sleep.
- *     WSE only (no TIX API):  Cannot trade programmatically. Sleep.
- *     TIX API (no 4S):        Hold — trend trading disabled by default (--trend to override).
- *     4S Data TIX API:        Trade on forecast threshold:
- *                             forecast > BUY_THRESHOLD  → buy long
- *                             forecast < SELL_THRESHOLD → sell long (if profitable)
- *                             forecast < STOPLOSS_4S    → sell long (stop-loss override)
+ *     No WSE account:    Report cost. Sleep.
+ *     WSE only (no TIX): Cannot trade programmatically. Sleep.
+ *     TIX API (no 4S):   Estimate forecast from up/down tick history.
+ *                        Requires EST_MIN_TICKS ticks before trading begins.
+ *                        Mode: LEARNING → EST
+ *     4S Data TIX API:   Use exact forecast from ns.stock.getForecast().
+ *                        Mode: 4S
  *
- *   Guards applied every cycle:
- *     - Never sell at a loss unless 4S stop-loss fires (forecast < STOPLOSS_4S)
- *     - Minimum profit threshold: profit > COMMISSION before exiting
- *     - Per-symbol position cap: max POSITION_CAP_FRAC of deployable cash per symbol
- *     - Capital depletes correctly across buys in same tick
- *     - Churn prevention: CHURN_COOLDOWN ticks between sell and re-buy of same symbol
- *     - 4S buy order: highest forecast first so best opportunities get most capital
+ *   Both EST and 4S modes use identical logic:
+ *     forecast > BUY_THRESHOLD  → buy long (highest forecast first)
+ *     forecast < SELL_THRESHOLD → sell long (if profitIfSold > 0)
+ *     forecast < STOPLOSS       → sell long (stop-loss, ignores P&L)
+ *     Price drops > PRICE_STOPLOSS_PCT below avgPx → emergency exit
+ *
+ *   Estimated forecast (pre-4S):
+ *     Each price tick is an independent Bernoulli trial with probability
+ *     chc = (50 ± otlkMag) / 100 of going up (from game source).
+ *     MLE estimate: estimatedForecast = upTicks / totalTicks over last
+ *     EST_WINDOW ticks. Accuracy improves with window size:
+ *       10 ticks → ±0.16,  30 → ±0.09,  50 → ±0.07
+ *
+ * Guards:
+ *   - MIN_ACCOUNT: no trading below £100M account balance
+ *   - TRADE_CAP_FRAC: max 2% of account per single trade
+ *   - MIN_POSITION_VALUE: min £1M position (commission ratio guard)
+ *   - CHURN_COOLDOWN: 10 ticks between sell and re-buy of same symbol
+ *   - Live bid re-check immediately before signal sells
  *
  * Changelog:
- *   v1.7.0 - Trend mode sell fixes: profit threshold relaxed to profitIfSold>0,
- *            percentage-based stop-loss (TREND_STOPLOSS_PCT=10%) when no 4S.
- *   v1.6.0 - All 5 efficiency guards: position cap, profit threshold, 4S stop-loss,
- *            forecast-sorted buys, churn prevention cooldown.
- *   v1.5.0 - Never sell at a loss: only sell when profitIfSold > 0.
- *   v1.4.0 - Gate trading on 4S by default (--trend to opt into trend mode).
- *            Fix cashAvail not decrementing between buys in same tick.
- *   v1.3.0 - Add --sell-all flag: liquidate all open long positions and exit.
- *   v1.2.0 - Track session P&L. Write stats to port 4 for dashboard.
- *   v1.1.0 - Replace bracket notation with direct ns.stock.* calls (RAM fix).
+ *   v1.9.0 - Replace trend mode with estimated forecast (MLE of chc from
+ *            up/down tick history). Unified buy/sell logic for EST and 4S.
+ *            Remove trend-specific take-profit/stop-loss targets.
+ *   v1.8.x - Trade cap 2%, £100M minimum, take-profit +3%, stop-loss -5%,
+ *            live bid re-checks, trend buy-the-dip logic.
+ *   v1.6.0 - All 5 efficiency guards.
+ *   v1.3.0 - --sell-all flag.
+ *   v1.2.0 - Port 4 P&L reporting.
+ *   v1.1.0 - RAM fix (direct ns.stock.* calls).
  *   v1.0.0 - Initial version.
  *
  * Flags:
@@ -44,10 +55,9 @@
  *   --floor N      Minimum cash fraction to keep liquid (default: 0.30)
  *   --once         Single cycle and exit
  *   --sell-all     Sell all open long positions and exit (graceful shutdown)
- *   --trend        Enable trend trading even without 4S data (risky, off by default)
  *
  * Ports:
- *   Writes port 4: { realised, unrealised, positions, buys, sells, mode } each cycle
+ *   Writes port 4: { realised, unrealised, positions, buys, sells, mode }
  *
  * Dependencies:
  *   None. Standalone — no imports.
@@ -55,38 +65,37 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.8.4';
+const VERSION     = '1.9.0';
 const PORT_STOCKS = 4;
 
-// 4S trading thresholds
-const BUY_THRESHOLD   = 0.55;  // forecast above this → buy signal
-const SELL_THRESHOLD  = 0.50;  // forecast below this → sell signal (if profitable)
-const STOPLOSS_4S     = 0.35;  // forecast below this → sell regardless of P&L (stop-loss)
+// Forecast thresholds — used identically for estimated and 4S forecasts
+const BUY_THRESHOLD  = 0.55;  // forecast above this → buy signal
+const SELL_THRESHOLD = 0.50;  // forecast below this → sell signal (if profitable)
+const STOPLOSS       = 0.35;  // forecast below this → sell regardless of P&L
 
-// Trend-tracking (no 4S) parameters
-const TREND_WINDOW      = 5;
-const TREND_DOWN_MIN    = 4;  // falls in window required to trigger buy-the-dip entry
+// Estimated forecast parameters (pre-4S)
+const EST_WINDOW   = 50;  // rolling window of up/down ticks
+const EST_MIN_TICKS = 10;  // minimum ticks before any buy signal considered
 
-// Commission per transaction
+// Price-based emergency stop-loss (backstop when forecast estimate is wrong)
+const PRICE_STOPLOSS_PCT = 0.15;  // sell if bid drops >15% below avgPx
+
+// Commission per transaction (entry or exit)
 const COMMISSION = 100e3;
 
-// Minimum profit over commissions required before exiting (4S mode only)
-const MIN_PROFIT_OVER_COMMISSION = COMMISSION;
-
-// Trend mode exit targets (applied to avgPx)
-const TREND_TAKEPROFIT_PCT = 0.03;  // sell when bid > avgPx * 1.03
-const TREND_STOPLOSS_PCT   = 0.05;  // sell when bid < avgPx * 0.95
+// Minimum net profit required for signal-driven sells (covers both commissions)
+const MIN_PROFIT = COMMISSION;
 
 // Maximum spend per single trade: 2% of total account balance
 const TRADE_CAP_FRAC = 0.02;
 
-// Minimum account balance before any trading is permitted
+// Minimum account balance before any new buys are placed
 const MIN_ACCOUNT = 100e6;
 
 // Ticks to wait before re-buying a symbol after selling it
 const CHURN_COOLDOWN = 10;
 
-// Minimum position value (covers entry + exit commission)
+// Minimum position value — guards against commission-dominated tiny positions
 const MIN_POSITION_VALUE = 1e6;
 
 
@@ -115,7 +124,7 @@ function sellAll(ns) {
     if (sold === 0) {
         ns.tprint('[STOCKS] No open positions to sell.');
     } else {
-        ns.tprint('[STOCKS] Sold ' + sold + ' positions | total proceeds: ' + ns.format.number(totalProceeds));
+        ns.tprint('[STOCKS] Sold ' + sold + ' positions | proceeds:' + ns.format.number(totalProceeds));
     }
     ns.clearPort(PORT_STOCKS);
 }
@@ -131,7 +140,7 @@ export async function main(ns) {
         ['floor',    0.30],
         ['once',     false],
         ['sell-all', false],
-        ['trend',    false],
+        ['trend',    false],  // kept for backwards compat — no longer used
     ]);
 
     ns.disableLog('ALL');
@@ -142,19 +151,19 @@ export async function main(ns) {
         return;
     }
 
-    const priceHistory = {};                // symbol → number[] ring buffer
-    const cooldown     = {};                // symbol → ticks remaining before re-buy allowed
-    const MONEY_FLOOR  = flags.floor;
-    const INTERVAL     = flags.interval * 1000;
-    const allowTrend   = flags['trend'];
+    const lastPrice = {};   // sym → last seen price (for detecting tick direction)
+    const upHistory = {};   // sym → boolean[] ring buffer (true = up tick)
+    const cooldown  = {};   // sym → ticks remaining before re-buy allowed
 
-    const stats = { realised: 0, buys: 0, sells: 0 };
+    const MONEY_FLOOR = flags.floor;
+    const INTERVAL    = flags.interval * 1000;
+    const stats       = { realised: 0, buys: 0, sells: 0 };
 
     ns.clearPort(PORT_STOCKS);
     ns.atExit(() => ns.clearPort(PORT_STOCKS));
 
     do {
-        tick(ns, priceHistory, cooldown, MONEY_FLOOR, stats, allowTrend);
+        tick(ns, lastPrice, upHistory, cooldown, MONEY_FLOOR, stats);
         if (!flags.once) await ns.sleep(INTERVAL);
     } while (!flags.once);
 }
@@ -164,65 +173,70 @@ export async function main(ns) {
 // Tick
 // =============================================================================
 
-function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
+function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
     const hasWSE = ns.stock.hasWseAccount();
     const hasTIX = ns.stock.hasTixApiAccess();
     const has4S  = hasTIX && ns.stock.has4SDataTixApi();
 
     if (!hasWSE) {
-        ns.print('[STOCKS] No WSE account. Purchase at World Stock Exchange for ~$200M.');
+        ns.print('[STOCKS] No WSE account. Purchase at World Stock Exchange for ~£200M.');
         writePort(ns, { realised: 0, unrealised: 0, positions: 0, buys: 0, sells: 0, mode: 'NO_WSE' });
         return;
     }
     if (!hasTIX) {
-        ns.print('[STOCKS] WSE active but no TIX API. Purchase TIX API for $5B to enable trading.');
+        ns.print('[STOCKS] WSE active but no TIX API. Purchase TIX API for £5B to enable trading.');
         writePort(ns, { realised: 0, unrealised: 0, positions: 0, buys: 0, sells: 0, mode: 'NO_TIX' });
-        return;
-    }
-    if (!has4S && !allowTrend) {
-        ns.print('[STOCKS] Waiting for 4S data — trend trading disabled. Use --trend to override.');
-        writePort(ns, { realised: stats.realised, unrealised: 0, positions: 0, buys: stats.buys, sells: stats.sells, mode: 'WAIT_4S' });
         return;
     }
 
     const symbols = ns.stock.getSymbols();
     const player  = ns.getPlayer();
 
-    if (player.money < MIN_ACCOUNT) {
-        ns.print('[STOCKS] Account below minimum (' + ns.format.number(MIN_ACCOUNT) + ') — no trades this cycle.');
-        writePort(ns, { realised: stats.realised, unrealised: 0, positions: 0, buys: stats.buys, sells: stats.sells, mode: 'LOW_FUNDS' });
-        return;
-    }
-
-    let cashLeft      = player.money * (1 - moneyFloor);
-    const tradeCap    = player.money * TRADE_CAP_FRAC;
-
     // Tick down churn cooldowns
     for (const sym of Object.keys(cooldown)) {
         cooldown[sym] = Math.max(0, cooldown[sym] - 1);
     }
 
-    // Build enriched symbol list with signals and positions
+    // Build enriched symbol list — update history and compute forecast
     const symData = symbols.map(sym => {
         const ask                       = ns.stock.getAskPrice(sym);
         const bid                       = ns.stock.getBidPrice(sym);
         const price                     = ns.stock.getPrice(sym);
         const [longShares, longAvgPx,,] = ns.stock.getPosition(sym);
         const maxShares                 = ns.stock.getMaxShares(sym);
-        const forecast                  = has4S ? ns.stock.getForecast(sym) : null;
 
-        // Update price history
-        if (!priceHistory[sym]) priceHistory[sym] = [];
-        priceHistory[sym].push(price);
-        if (priceHistory[sym].length > TREND_WINDOW) priceHistory[sym].shift();
+        // Update up/down history (skip flat ticks — price didn't move)
+        const prev = lastPrice[sym];
+        lastPrice[sym] = price;
+        if (prev !== undefined && price !== prev) {
+            if (!upHistory[sym]) upHistory[sym] = [];
+            upHistory[sym].push(price > prev);
+            if (upHistory[sym].length > EST_WINDOW) upHistory[sym].shift();
+        }
 
-        const signal = has4S
-            ? get4SSignal(forecast)
-            : getTrendSignal(priceHistory[sym]);
+        const history = upHistory[sym] || [];
 
-        return { sym, ask, bid, longShares, longAvgPx, maxShares, forecast, signal };
+        // Forecast: 4S gives exact value; otherwise estimate from up/down history
+        let forecast;
+        if (has4S) {
+            forecast = ns.stock.getForecast(sym);
+        } else if (history.length >= EST_MIN_TICKS) {
+            forecast = history.filter(Boolean).length / history.length;
+        } else {
+            forecast = null;  // not enough history yet
+        }
+
+        const signal = forecast !== null ? getForecastSignal(forecast) : 'hold';
+
+        return { sym, ask, bid, longShares, longAvgPx, maxShares, forecast, signal, histLen: history.length };
     });
 
+    // Determine mode for display
+    const minHistory = symData.reduce((m, d) => Math.min(m, d.histLen), Infinity);
+    const mode = has4S ? '4S' : minHistory >= EST_MIN_TICKS ? 'EST' : 'LEARNING';
+
+    let cashLeft     = player.money * (1 - moneyFloor);
+    const tradeCap   = player.money * TRADE_CAP_FRAC;
     let cycleBuys = 0, cycleSells = 0;
     let unrealised = 0, openPositions = 0;
 
@@ -237,97 +251,100 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
 
         if (longShares <= 0) continue;
 
-        const profitIfSold   = (bid - longAvgPx) * longShares - 2 * COMMISSION;
-        const stopLoss4S     = has4S && forecast < STOPLOSS_4S;
-        const takeProfitTrend = !has4S && longAvgPx > 0
-            && bid >= longAvgPx * (1 + TREND_TAKEPROFIT_PCT)
-            && profitIfSold > 0;
-        const stopLossTrend   = !has4S && longAvgPx > 0 && bid <= longAvgPx * (1 - TREND_STOPLOSS_PCT);
-        const profitOk = profitIfSold > MIN_PROFIT_OVER_COMMISSION;
+        const profitIfSold = (bid - longAvgPx) * longShares - 2 * COMMISSION;
+        const profitOk     = profitIfSold > MIN_PROFIT;
 
-        // Trend mode: exit on fixed take-profit (+3%) or stop-loss (-5%) vs avgPx.
-        // 4S mode: exit on forecast signal (if profitable) or 4S stop-loss.
-        const shouldSell = has4S
-            ? (signal === 'sell' && profitOk) || stopLoss4S
-            : takeProfitTrend || stopLossTrend;
+        // Stop-loss: forecast strongly bearish OR price crashed below safety floor
+        const forecastStopLoss = forecast !== null && forecast < STOPLOSS;
+        const priceStopLoss    = longAvgPx > 0 && bid <= longAvgPx * (1 - PRICE_STOPLOSS_PCT);
 
-        if (shouldSell) {
-            // Re-read bid immediately before selling to guard against a market tick
-            // firing between the profitability check and sellStock execution.
-            // Stop-loss paths skip this — they execute unconditionally by design.
-            if (!stopLoss4S && !stopLossTrend) {
-                const liveBid          = ns.stock.getBidPrice(sym);
-                const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
-                const liveTakeProfit   = !has4S && liveBid >= longAvgPx * (1 + TREND_TAKEPROFIT_PCT) && liveProfitIfSold > 0;
-                const liveSignalOk     = has4S && liveProfitIfSold > MIN_PROFIT_OVER_COMMISSION;
-                if (!liveTakeProfit && !liveSignalOk) continue;
-            }
-            const proceeds = ns.stock.sellStock(sym, longShares);
-            if (proceeds > 0) {
-                const profit = proceeds - longShares * longAvgPx - COMMISSION;
-                stats.realised += profit;
-                stats.sells++;
-                cycleSells++;
-                cashLeft += proceeds;
-                cooldown[sym] = CHURN_COOLDOWN;
-                const reason = stopLoss4S      ? 'STOPLOSS f=' + forecast.toFixed(2)
-                             : stopLossTrend  ? 'STOPLOSS -' + (TREND_STOPLOSS_PCT * 100).toFixed(0) + '%'
-                             : takeProfitTrend ? 'TAKEPROFIT +' + (TREND_TAKEPROFIT_PCT * 100).toFixed(0) + '%'
-                             : 'signal';
-                ns.print('[STOCKS] SELL ' + sym + ' (' + reason + ')' +
-                    ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit) +
-                    ' | session:' + (stats.realised >= 0 ? '+' : '') + ns.format.number(stats.realised));
-            }
+        const shouldSell = (signal === 'sell' && profitOk)
+                        || forecastStopLoss
+                        || priceStopLoss;
+
+        if (!shouldSell) continue;
+
+        // Re-read bid immediately before executing to guard against market tick
+        // firing between check and sell. Stop-loss paths skip this — they must execute.
+        if (!forecastStopLoss && !priceStopLoss) {
+            const liveBid          = ns.stock.getBidPrice(sym);
+            const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
+            if (liveProfitIfSold <= MIN_PROFIT) continue;
+        }
+
+        const proceeds = ns.stock.sellStock(sym, longShares);
+        if (proceeds > 0) {
+            const profit = proceeds - longShares * longAvgPx - COMMISSION;
+            stats.realised += profit;
+            stats.sells++;
+            cycleSells++;
+            cashLeft += proceeds;
+            cooldown[sym] = CHURN_COOLDOWN;
+
+            const reason = forecastStopLoss
+                ? 'STOPLOSS f=' + forecast.toFixed(2)
+                : priceStopLoss
+                ? 'STOPLOSS -' + (PRICE_STOPLOSS_PCT * 100).toFixed(0) + '%'
+                : 'signal f=' + (forecast !== null ? forecast.toFixed(2) : '?');
+
+            ns.print('[STOCKS] SELL ' + sym + ' (' + reason + ')' +
+                ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit) +
+                ' | session:' + (stats.realised >= 0 ? '+' : '') + ns.format.number(stats.realised));
         }
     }
 
-    // --- Pass 2: Buys — sorted by forecast descending (best opportunity first) ---
-    // Trend mode: never add to existing position — one entry per symbol, so profitIfSold
-    // accounts for exactly 2 commissions (1 entry + 1 exit). Adding more lots would
-    // accumulate entry commissions that profitIfSold doesn't track.
-    const buyable = symData
-        .filter(d => d.signal === 'buy')
-        .filter(d => has4S ? d.longShares < d.maxShares : d.longShares === 0)
-        .filter(d => !cooldown[d.sym])
-        .sort((a, b) => (b.forecast || 0) - (a.forecast || 0));
+    // --- Pass 2: Buys ---
+    // Gate on minimum account size and sufficient history
+    const canBuy = player.money >= MIN_ACCOUNT && (has4S || minHistory >= EST_MIN_TICKS);
 
-    for (const d of buyable) {
-        if (cashLeft <= COMMISSION) break;
+    if (canBuy) {
+        const buyable = symData
+            .filter(d => d.signal === 'buy')
+            .filter(d => d.longShares < d.maxShares)
+            .filter(d => !cooldown[d.sym])
+            .sort((a, b) => (b.forecast || 0) - (a.forecast || 0));
 
-        const { sym, ask, longShares, maxShares } = d;
-        const budget          = Math.min(cashLeft, tradeCap);
-        const remainingShares = maxShares - longShares;
-        const affordShares    = Math.floor((budget - COMMISSION) / ask);
-        const sharesToBuy     = Math.min(remainingShares, affordShares);
+        for (const d of buyable) {
+            if (cashLeft <= COMMISSION) break;
 
-        if (sharesToBuy <= 0) continue;
-        if (sharesToBuy * ask < MIN_POSITION_VALUE) continue;
+            const { sym, ask, longShares, maxShares, forecast } = d;
+            const budget          = Math.min(cashLeft, tradeCap);
+            const remainingShares = maxShares - longShares;
+            const affordShares    = Math.floor((budget - COMMISSION) / ask);
+            const sharesToBuy     = Math.min(remainingShares, affordShares);
 
-        const cost = ns.stock.buyStock(sym, sharesToBuy);
-        if (cost > 0) {
-            cashLeft -= cost;
-            stats.buys++;
-            cycleBuys++;
-            ns.print('[STOCKS] BUY  ' + sym + ' | shares:' + sharesToBuy +
-                ' | cost:' + ns.format.number(cost) +
-                (d.forecast !== null ? ' | f=' + d.forecast.toFixed(2) : ' | trend'));
+            if (sharesToBuy <= 0) continue;
+            if (sharesToBuy * ask < MIN_POSITION_VALUE) continue;
+
+            const cost = ns.stock.buyStock(sym, sharesToBuy);
+            if (cost > 0) {
+                cashLeft -= cost;
+                stats.buys++;
+                cycleBuys++;
+                ns.print('[STOCKS] BUY  ' + sym + ' | shares:' + sharesToBuy +
+                    ' | cost:' + ns.format.number(cost) +
+                    ' | f=' + (forecast !== null ? forecast.toFixed(2) : '?') +
+                    (has4S ? '' : '~'));
+            }
         }
     }
 
     if (cycleBuys > 0 || cycleSells > 0) {
-        ns.print('[STOCKS] Cycle: ' + cycleBuys + ' buys, ' + cycleSells + ' sells');
+        ns.print('[STOCKS] Cycle: ' + cycleBuys + ' buys, ' + cycleSells + ' sells | mode:' + mode);
     } else {
-        ns.print('[STOCKS] Cycle: no trades | mode:' + (has4S ? '4S' : 'trend') +
+        const learningPct = has4S ? '' : ' (' + Math.min(minHistory, EST_MIN_TICKS) + '/' + EST_MIN_TICKS + ')';
+        ns.print('[STOCKS] Cycle: no trades | mode:' + mode + learningPct +
             ' | open:' + openPositions +
             ' | unrealised:' + (unrealised >= 0 ? '+' : '') + ns.format.number(unrealised));
-        // Per-position signal debug (only when open positions exist)
+
+        // Per-position debug on no-trade cycles
         for (const d of symData) {
             if (d.longShares <= 0) continue;
             const profitIfSold = (d.bid - d.longAvgPx) * d.longShares - 2 * COMMISSION;
-            const stopLossTrend = !has4S && d.longAvgPx > 0 && d.bid < d.longAvgPx * (1 - TREND_STOPLOSS_PCT);
-            ns.print('  ' + d.sym + ' sig:' + d.signal
-                + ' profit:' + (profitIfSold >= 0 ? '+' : '') + ns.format.number(profitIfSold)
-                + (stopLossTrend ? ' STOPLOSS' : ''));
+            ns.print('  ' + d.sym
+                + ' f=' + (d.forecast !== null ? d.forecast.toFixed(2) + (has4S ? '' : '~') : '?')
+                + ' sig:' + d.signal
+                + ' profit:' + (profitIfSold >= 0 ? '+' : '') + ns.format.number(profitIfSold));
         }
     }
 
@@ -337,7 +354,7 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
         positions: openPositions,
         buys:      stats.buys,
         sells:     stats.sells,
-        mode:      has4S ? '4S' : 'TREND',
+        mode,
     });
 }
 
@@ -353,21 +370,11 @@ function writePort(ns, data) {
 
 
 // =============================================================================
-// Signal generators
+// Signal generator (used for both estimated and 4S forecasts)
 // =============================================================================
 
-function get4SSignal(forecast) {
+function getForecastSignal(forecast) {
     if (forecast > BUY_THRESHOLD)  return 'buy';
     if (forecast < SELL_THRESHOLD) return 'sell';
-    return 'hold';
-}
-
-function getTrendSignal(history) {
-    if (history.length < TREND_WINDOW) return 'hold';
-    let falls = 0;
-    for (let i = 1; i < history.length; i++) {
-        if (history[i] < history[i - 1]) falls++;
-    }
-    if (falls >= TREND_DOWN_MIN) return 'buy';
     return 'hold';
 }
