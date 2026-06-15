@@ -55,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.7.1';
+const VERSION   = '1.7.2';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -258,9 +258,12 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
     }
 
     // --- Pass 2: Buys — sorted by forecast descending (best opportunity first) ---
+    // Trend mode: never add to existing position — one entry per symbol, so profitIfSold
+    // accounts for exactly 2 commissions (1 entry + 1 exit). Adding more lots would
+    // accumulate entry commissions that profitIfSold doesn't track.
     const buyable = symData
         .filter(d => d.signal === 'buy')
-        .filter(d => d.longShares < d.maxShares)
+        .filter(d => has4S ? d.longShares < d.maxShares : d.longShares === 0)
         .filter(d => !cooldown[d.sym])
         .sort((a, b) => (b.forecast || 0) - (a.forecast || 0));
 
