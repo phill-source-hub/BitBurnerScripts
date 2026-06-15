@@ -227,7 +227,7 @@ function collectData(ns) {
             ns.print('[FACTION] no faction: joined=' + JSON.stringify(joined) + ' work=' + JSON.stringify(work));
         }
     } catch (e) {
-        ns.print('[FACTION] error: ' + e.message);
+        ns.print('[FACTION] error: ' + String(e) + ' | type:' + typeof e + ' | keys:' + Object.keys(e || {}).join(','));
     }
 
     // Mutate sharedData in place so React's getData() always reads current values
