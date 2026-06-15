@@ -209,25 +209,14 @@ function collectData(ns) {
     try { income = ns.getTotalScriptIncome(); } catch (_) {}
 
     let factionData = null;
-    try {
-        const sing   = ns['singularity'];
-        const joined = player.factions || [];
-        let fac = null;
-        const work = player.currentWork;
-        if (work && work.type === 'FACTION') {
-            fac = work.factionName;
-        } else if (joined.length > 0) {
-            fac = joined[joined.length - 1];
-        }
-        if (fac) {
-            const rep    = sing['getFactionRep'](fac);
-            const favour = sing['getFactionFavor'](fac);
-            factionData = { name: fac, rep, favour };
-        } else {
-            ns.print('[FACTION] no faction: joined=' + JSON.stringify(joined) + ' work=' + JSON.stringify(work));
-        }
-    } catch (e) {
-        ns.print('[FACTION] error: ' + String(e) + ' | type:' + typeof e + ' | keys:' + Object.keys(e || {}).join(','));
+    ns.print('[FACTION] diag: factions=' + JSON.stringify(player.factions || []) + ' work=' + JSON.stringify(player.currentWork));
+    try { ns.print('[FACTION] sing type=' + typeof ns['singularity']); } catch(e) { ns.print('[FACTION] sing access threw'); }
+    try { ns.print('[FACTION] getFactionRep type=' + typeof ns['singularity']['getFactionRep']); } catch(e) { ns.print('[FACTION] getFactionRep access threw'); }
+    const joined = player.factions || [];
+    const fac = joined.length > 0 ? joined[joined.length - 1] : null;
+    if (fac) {
+        try { const rep = ns['singularity']['getFactionRep'](fac);    ns.print('[FACTION] rep=' + rep); } catch(e) { ns.print('[FACTION] getFactionRep call threw: ' + String(e)); }
+        try { const fav = ns['singularity']['getFactionFavor'](fac);  ns.print('[FACTION] fav=' + fav); } catch(e) { ns.print('[FACTION] getFactionFavor call threw: ' + String(e)); }
     }
 
     // Mutate sharedData in place so React's getData() always reads current values
