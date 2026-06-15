@@ -55,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.7.4';
+const VERSION   = '1.8.0';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -64,9 +64,8 @@ const SELL_THRESHOLD  = 0.50;  // forecast below this → sell signal (if profit
 const STOPLOSS_4S     = 0.35;  // forecast below this → sell regardless of P&L (stop-loss)
 
 // Trend-tracking (no 4S) parameters
-const TREND_WINDOW   = 5;
-const TREND_UP_MIN   = 4;
-const TREND_DOWN_MIN = 3;
+const TREND_WINDOW      = 5;
+const TREND_DOWN_MIN    = 4;  // falls in window required to trigger buy-the-dip entry
 
 // Commission per transaction
 const COMMISSION = 100e3;
@@ -74,9 +73,9 @@ const COMMISSION = 100e3;
 // Minimum profit over commissions required before exiting (4S mode only)
 const MIN_PROFIT_OVER_COMMISSION = COMMISSION;
 
-// Trend mode stop-loss: sell if position is down more than this fraction from avg cost
-// Tighter than 4S stop-loss — trend buys near peaks so losses mount quickly
-const TREND_STOPLOSS_PCT = 0.05;
+// Trend mode exit targets (applied to avgPx)
+const TREND_TAKEPROFIT_PCT = 0.03;  // sell when bid > avgPx * 1.03
+const TREND_STOPLOSS_PCT   = 0.05;  // sell when bid < avgPx * 0.95
 
 // Maximum fraction of deployable cash to put into any single symbol
 const POSITION_CAP_FRAC = 0.20;
@@ -230,16 +229,15 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
 
         const profitIfSold   = (bid - longAvgPx) * longShares - 2 * COMMISSION;
         const stopLoss4S     = has4S && forecast < STOPLOSS_4S;
-        const stopLossTrend  = !has4S && longAvgPx > 0 && bid < longAvgPx * (1 - TREND_STOPLOSS_PCT);
+        const takeProfitTrend = !has4S && longAvgPx > 0 && bid >= longAvgPx * (1 + TREND_TAKEPROFIT_PCT);
+        const stopLossTrend   = !has4S && longAvgPx > 0 && bid <= longAvgPx * (1 - TREND_STOPLOSS_PCT);
         const profitOk = profitIfSold > MIN_PROFIT_OVER_COMMISSION;
 
-        // Trend mode: only exit via stop-loss. Buying on 4/4 rises lands near local peaks
-        // so positions go underwater quickly — signal sells would require profitOk which
-        // never recovers. Stop-loss at 5% caps drawdown and recycles capital.
-        // 4S mode: exit on signal (forecast-driven) OR 4S stop-loss.
+        // Trend mode: exit on fixed take-profit (+3%) or stop-loss (-5%) vs avgPx.
+        // 4S mode: exit on forecast signal (if profitable) or 4S stop-loss.
         const shouldSell = has4S
             ? (signal === 'sell' && profitOk) || stopLoss4S
-            : stopLossTrend;
+            : takeProfitTrend || stopLossTrend;
 
         if (shouldSell) {
             const proceeds = ns.stock.sellStock(sym, longShares);
@@ -250,8 +248,9 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
                 cycleSells++;
                 cashLeft += proceeds;
                 cooldown[sym] = CHURN_COOLDOWN;
-                const reason = stopLoss4S    ? 'STOPLOSS f=' + forecast.toFixed(2)
-                             : stopLossTrend ? 'STOPLOSS -' + (TREND_STOPLOSS_PCT * 100).toFixed(0) + '%'
+                const reason = stopLoss4S      ? 'STOPLOSS f=' + forecast.toFixed(2)
+                             : stopLossTrend  ? 'STOPLOSS -' + (TREND_STOPLOSS_PCT * 100).toFixed(0) + '%'
+                             : takeProfitTrend ? 'TAKEPROFIT +' + (TREND_TAKEPROFIT_PCT * 100).toFixed(0) + '%'
                              : 'signal';
                 ns.print('[STOCKS] SELL ' + sym + ' (' + reason + ')' +
                     ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit) +
@@ -343,12 +342,10 @@ function get4SSignal(forecast) {
 
 function getTrendSignal(history) {
     if (history.length < TREND_WINDOW) return 'hold';
-    let rises = 0, falls = 0;
+    let falls = 0;
     for (let i = 1; i < history.length; i++) {
-        if (history[i] > history[i - 1]) rises++;
-        else if (history[i] < history[i - 1]) falls++;
+        if (history[i] < history[i - 1]) falls++;
     }
-    if (rises >= TREND_UP_MIN)   return 'buy';
-    if (falls >= TREND_DOWN_MIN) return 'sell';
+    if (falls >= TREND_DOWN_MIN) return 'buy';
     return 'hold';
 }
