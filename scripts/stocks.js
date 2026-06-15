@@ -55,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.8.0';
+const VERSION   = '1.8.1';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -77,8 +77,11 @@ const MIN_PROFIT_OVER_COMMISSION = COMMISSION;
 const TREND_TAKEPROFIT_PCT = 0.03;  // sell when bid > avgPx * 1.03
 const TREND_STOPLOSS_PCT   = 0.05;  // sell when bid < avgPx * 0.95
 
-// Maximum fraction of deployable cash to put into any single symbol
-const POSITION_CAP_FRAC = 0.20;
+// Maximum spend per single trade: 2% of total account balance
+const TRADE_CAP_FRAC = 0.02;
+
+// Minimum account balance before any trading is permitted
+const MIN_ACCOUNT = 100e6;
 
 // Ticks to wait before re-buying a symbol after selling it
 const CHURN_COOLDOWN = 10;
@@ -184,8 +187,15 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
 
     const symbols = ns.stock.getSymbols();
     const player  = ns.getPlayer();
-    let cashLeft  = player.money * (1 - moneyFloor);
-    const perSymCap = player.money * (1 - moneyFloor) * POSITION_CAP_FRAC;
+
+    if (player.money < MIN_ACCOUNT) {
+        ns.print('[STOCKS] Account below minimum (' + ns.format.number(MIN_ACCOUNT) + ') — no trades this cycle.');
+        writePort(ns, { realised: stats.realised, unrealised: 0, positions: 0, buys: stats.buys, sells: stats.sells, mode: 'LOW_FUNDS' });
+        return;
+    }
+
+    let cashLeft      = player.money * (1 - moneyFloor);
+    const tradeCap    = player.money * TRADE_CAP_FRAC;
 
     // Tick down churn cooldowns
     for (const sym of Object.keys(cooldown)) {
@@ -273,7 +283,7 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
         if (cashLeft <= COMMISSION) break;
 
         const { sym, ask, longShares, maxShares } = d;
-        const budget          = Math.min(cashLeft, perSymCap);
+        const budget          = Math.min(cashLeft, tradeCap);
         const remainingShares = maxShares - longShares;
         const affordShares    = Math.floor((budget - COMMISSION) / ask);
         const sharesToBuy     = Math.min(remainingShares, affordShares);
