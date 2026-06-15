@@ -55,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.7.2';
+const VERSION   = '1.7.3';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -239,6 +239,16 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
                         || stopLossTrend;
 
         if (shouldSell) {
+            // Re-check bid immediately before selling — a market tick may have fired
+            // between our getBidPrice read and now, making profitOk stale.
+            if (!stopLoss4S && !stopLossTrend) {
+                const liveBid          = ns.stock.getBidPrice(sym);
+                const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
+                const liveProfitOk     = has4S
+                    ? liveProfitIfSold > MIN_PROFIT_OVER_COMMISSION
+                    : liveProfitIfSold > 0;
+                if (!liveProfitOk) continue;
+            }
             const proceeds = ns.stock.sellStock(sym, longShares);
             if (proceeds > 0) {
                 const profit = proceeds - longShares * longAvgPx - COMMISSION;
