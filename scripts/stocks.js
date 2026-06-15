@@ -27,6 +27,7 @@
  *   on stocks in any single cycle.
  *
  * Changelog:
+ *   v1.5.0 - Never sell at a loss: only sell when (bid - avgCost) * shares > commission.
  *   v1.4.0 - Gate trading on 4S by default (--trend to opt into trend mode).
  *            Fix cashAvail not decrementing between buys in same tick.
  *   v1.3.0 - Add --sell-all flag: liquidate all open long positions and exit.
@@ -54,7 +55,7 @@
  *   + buyStock/sellStock ~0.5 each + access checks ~0.15
  */
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -195,7 +196,9 @@ function tick(ns, priceHistory, moneyFloor, stats, allowTrend) {
             : getTrendSignal(priceHistory[sym]);
 
         // --- Sell existing long position ---
-        if (longShares > 0 && signal === 'sell') {
+        // Only sell if position is profitable after exit commission — never lock in a loss.
+        const profitIfSold = (bid - longAvgPx) * longShares - COMMISSION;
+        if (longShares > 0 && signal === 'sell' && profitIfSold > 0) {
             const proceeds = ns.stock.sellStock(sym, longShares);
             if (proceeds > 0) {
                 const profit = proceeds - longShares * longAvgPx - COMMISSION;
