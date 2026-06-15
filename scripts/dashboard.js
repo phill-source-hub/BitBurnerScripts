@@ -1,17 +1,17 @@
 /**
  * dashboard.js
- * Version: 1.1.0
+ * Version: 1.4.0
  *
  * Interactive React operations dashboard for PhlanxOS.
  *
  * Behaviour:
- *   Renders a single React component into the tail window. The component
- *   polls all game state every 2 seconds via React.useEffect + setInterval
- *   and updates itself — no clearLog/reprint loop needed.
+ *   Renders a single React component into the tail window. Game state is
+ *   collected by the main script loop (valid NS async context) and stored
+ *   in a shared data object. The React component reads from that object on
+ *   a pure-JS setInterval tick — no NS calls inside React at all.
  *
  *   Scripts panel: running scripts shown with full row + STOP button.
  *   Non-running scripts collapsed to a compact dim row (name + START only).
- *   This keeps the panel small when few scripts are running.
  *
  *   Sections:
  *     Header      — title, timestamp, tier, hacking level, money, $/s
@@ -21,18 +21,17 @@
  *     HWGW        — active targets from port 1
  *     Hacknet     — from port 3 (node or server mode)
  *     Share       — current sharePower
- *     Corporation — phase, revenue, funds (if corp API available)
- *     Bladeburner — rank, current action (if BB API available)
+ *     Corporation — funds, revenue, division count
+ *     Bladeburner — rank, current action
  *
  * Changelog:
- *   v1.3.0 - Replace ns.format.number in render functions with pure-JS fmtNum.
- *            NS calls from React render/setInterval context cause uncaught exceptions
- *            displayed as "Error in custom react content". gatherData now wrapped
- *            in try/catch returning previous state on failure. getTotalScriptIncome
- *            individually guarded.
- *   v1.2.0 - Fix ns.format.number arg type (was numeral.js format string, not number).
- *   v1.1.0 - Compact non-running scripts. Add corp + bladeburner sections.
- *            Add grafting, go, stanek to MANAGED list.
+ *   v1.4.0 - Architectural fix: all NS calls moved to main() loop (valid async
+ *            context). React component reads a shared data object via pure-JS
+ *            setInterval — no NS calls in React at all. NS functions throw when
+ *            called from setInterval callbacks in Bitburner's React context.
+ *   v1.3.0 - Replace ns.format.number with pure-JS fmtNum. gatherData try/catch.
+ *   v1.2.0 - Fix ns.format.number arg type.
+ *   v1.1.0 - Compact non-running scripts. Corp + bladeburner sections.
  *   v1.0.0 - Initial version.
  *
  * Flags:
@@ -49,7 +48,7 @@
  * RAM: ~4.5 GB
  */
 
-const VERSION    = '1.3.0';
+const VERSION    = '1.4.0';
 const POLL_MS    = 2000;
 const STALE_MS   = 2 * 60 * 1000;
 const TIER_MIN   = 2;
@@ -96,93 +95,17 @@ const e = React.createElement;
 
 
 // =============================================================================
-// Pure-JS number formatter — keeps NS calls out of React render phase
+// Pure-JS number formatter — no NS calls
 // =============================================================================
 
 function fmtNum(n, decimals) {
     if (decimals === undefined) decimals = 2;
     if (n === undefined || n === null || isNaN(n)) return '0';
-    const abs = Math.abs(n);
     const suffixes = ['', 'k', 'm', 'b', 't', 'q'];
     let i = 0;
     let v = n;
     while (Math.abs(v) >= 1000 && i < suffixes.length - 1) { v /= 1000; i++; }
     return v.toFixed(decimals) + suffixes[i];
-}
-
-
-// =============================================================================
-// Data polling
-// =============================================================================
-
-function gatherData(ns, prev) {
-    try {
-        const player   = ns.getPlayer();
-        const homeMax  = ns.getServerMaxRam('home');
-        const homeUsed = ns.getServerUsedRam('home');
-
-        const homeProcs = ns.ps('home');
-        const running   = new Set(homeProcs.map(function(p) {
-            return p.filename.replace(/^\//, '');
-        }));
-
-        let sharePow = 1;
-        try { sharePow = ns.getSharePower(); } catch (_) {}
-
-        const p1Raw    = ns.peek(1);
-        const hwgwData = (p1Raw === 'NULL PORT DATA') ? null : safeParse(p1Raw);
-
-        const p3Raw       = ns.peek(3);
-        const hacknetData = (p3Raw === 'NULL PORT DATA') ? null : safeParse(p3Raw);
-
-        let farmMax = 0, farmUsed = 0, farmCount = 0, farmLimit = 0;
-        try {
-            const names = ns.cloud.getServerNames();
-            farmLimit   = ns.cloud.getServerLimit();
-            farmCount   = names.length;
-            for (var i = 0; i < names.length; i++) {
-                farmMax  += ns.getServerMaxRam(names[i]);
-                farmUsed += ns.getServerUsedRam(names[i]);
-            }
-        } catch (_) {}
-
-        const targets    = (hwgwData && hwgwData.targets) ? hwgwData.targets : {};
-        const cycleStart = (hwgwData && hwgwData.cycleStart) ? hwgwData.cycleStart : 0;
-        const stale      = (Date.now() - cycleStart) > STALE_MS;
-
-        let corpData = null;
-        try {
-            const corp = ns['corporation'];
-            if (corp['hasCorporation']()) {
-                const cd = corp['getCorporation']();
-                corpData = { funds: cd.funds, revenue: cd.revenue, divs: cd.divisions.length };
-            }
-        } catch (_) {}
-
-        let bbData = null;
-        try {
-            const bb = ns['bladeburner'];
-            if (bb['inBladeburner']()) {
-                const action = bb['getCurrentAction']();
-                bbData = { rank: bb['getRank'](), action: action ? action.name : 'idle', sp: bb['getSkillPoints']() };
-            }
-        } catch (_) {}
-
-        let income = [0, 0];
-        try { income = ns.getTotalScriptIncome(); } catch (_) {}
-
-        return {
-            player, homeMax, homeUsed, running,
-            sharePow, hwgwData, hacknetData, stale,
-            farmMax, farmUsed, farmCount, farmLimit,
-            targets, cycleStart, corpData, bbData,
-            now: Date.now(),
-            income,
-        };
-    } catch (err) {
-        ns.tprint('[DASHBOARD] gatherData error: ' + err);
-        return prev || null;
-    }
 }
 
 function safeParse(raw) {
@@ -191,34 +114,112 @@ function safeParse(raw) {
 
 
 // =============================================================================
-// React component
+// Shared data object — written by main() loop, read by React component
+// =============================================================================
+
+const INIT_DATA = {
+    player: null, homeMax: 0, homeUsed: 0, running: new Set(),
+    sharePow: 1, hwgwData: null, hacknetData: null, stale: true,
+    farmMax: 0, farmUsed: 0, farmCount: 0, farmLimit: 0,
+    targets: {}, cycleStart: 0, corpData: null, bbData: null,
+    now: Date.now(), income: [0, 0],
+};
+
+// Single shared reference; main() mutates this each poll cycle.
+// React reads it on its own tick — no NS calls in React context.
+let sharedData = Object.assign({}, INIT_DATA);
+
+/**
+ * Collects all game state via NS. Called only from main()'s async loop —
+ * valid NS execution context. Updates sharedData in place.
+ * @param {NS} ns
+ */
+function collectData(ns) {
+    const player   = ns.getPlayer();
+    const homeMax  = ns.getServerMaxRam('home');
+    const homeUsed = ns.getServerUsedRam('home');
+
+    const homeProcs = ns.ps('home');
+    const running   = new Set(homeProcs.map(function(p) {
+        return p.filename.replace(/^\//, '');
+    }));
+
+    let sharePow = 1;
+    try { sharePow = ns.getSharePower(); } catch (_) {}
+
+    const p1Raw    = ns.peek(1);
+    const hwgwData = (p1Raw === 'NULL PORT DATA') ? null : safeParse(p1Raw);
+
+    const p3Raw       = ns.peek(3);
+    const hacknetData = (p3Raw === 'NULL PORT DATA') ? null : safeParse(p3Raw);
+
+    let farmMax = 0, farmUsed = 0, farmCount = 0, farmLimit = 0;
+    try {
+        const names = ns.cloud.getServerNames();
+        farmLimit   = ns.cloud.getServerLimit();
+        farmCount   = names.length;
+        for (let i = 0; i < names.length; i++) {
+            farmMax  += ns.getServerMaxRam(names[i]);
+            farmUsed += ns.getServerUsedRam(names[i]);
+        }
+    } catch (_) {}
+
+    const targets    = (hwgwData && hwgwData.targets) ? hwgwData.targets : {};
+    const cycleStart = (hwgwData && hwgwData.cycleStart) ? hwgwData.cycleStart : 0;
+    const stale      = (Date.now() - cycleStart) > STALE_MS;
+
+    let corpData = null;
+    try {
+        const corp = ns['corporation'];
+        if (corp['hasCorporation']()) {
+            const cd = corp['getCorporation']();
+            corpData = { funds: cd.funds, revenue: cd.revenue, divs: cd.divisions.length };
+        }
+    } catch (_) {}
+
+    let bbData = null;
+    try {
+        const bb = ns['bladeburner'];
+        if (bb['inBladeburner']()) {
+            const action = bb['getCurrentAction']();
+            bbData = { rank: bb['getRank'](), action: action ? action.name : 'idle', sp: bb['getSkillPoints']() };
+        }
+    } catch (_) {}
+
+    let income = [0, 0];
+    try { income = ns.getTotalScriptIncome(); } catch (_) {}
+
+    // Mutate sharedData in place so React's getData() always reads current values
+    sharedData = {
+        player, homeMax, homeUsed, running,
+        sharePow, hwgwData, hacknetData, stale,
+        farmMax, farmUsed, farmCount, farmLimit,
+        targets, cycleStart, corpData, bbData,
+        now: Date.now(), income,
+    };
+}
+
+
+// =============================================================================
+// React component — reads sharedData, no NS calls
 // =============================================================================
 
 function Dashboard(props) {
-    var ns = props.ns;
+    var ns       = props.ns;
+    var getData  = props.getData;
 
-    var init = {
-        player: null, homeMax: 0, homeUsed: 0, running: new Set(),
-        sharePow: 1, hwgwData: null, hacknetData: null, stale: true,
-        farmMax: 0, farmUsed: 0, farmCount: 0, farmLimit: 0,
-        targets: {}, cycleStart: 0, corpData: null, bbData: null,
-        now: Date.now(), income: [0, 0],
-    };
-
-    var stateArr = React.useState(init);
-    var d        = stateArr[0];
-    var setD     = stateArr[1];
+    var stateArr = React.useState(0);
+    var tick     = stateArr[0];
+    var setTick  = stateArr[1];
 
     React.useEffect(function() {
-        var current = d;
-        function poll() {
-            var next = gatherData(ns, current);
-            if (next) { current = next; setD(next); }
-        }
-        poll();
-        var id = window.setInterval(poll, POLL_MS);
+        var id = window.setInterval(function() {
+            setTick(function(t) { return t + 1; });  // pure React state update — no NS
+        }, POLL_MS);
         return function() { window.clearInterval(id); };
     }, []);
+
+    var d = getData();
 
     if (!d.player) {
         return e('div', { style: { color: C.dim, padding: '12px', fontFamily: 'monospace' } }, 'Initialising...');
@@ -234,10 +235,10 @@ function Dashboard(props) {
         renderRamRow(d),
         renderScripts(d, ns),
         renderHWGW(d),
-        renderHacknet(d, ns),
+        renderHacknet(d),
         renderShare(d),
-        d.corpData ? renderCorp(d, ns)        : null,
-        d.bbData   ? renderBladeburner(d, ns) : null,
+        d.corpData ? renderCorp(d)        : null,
+        d.bbData   ? renderBladeburner(d) : null,
         renderFooter(),
     ]);
 }
@@ -251,6 +252,7 @@ function renderHeader(d, ns) {
     var tier   = d.homeMax >= 64 ? 3 : d.homeMax >= 32 ? 2 : d.homeMax >= 16 ? 1 : 0;
     var money  = d.player ? d.player.money : 0;
     var income = d.income ? d.income[0] : 0;
+    var hack   = d.player && d.player.skills ? d.player.skills.hacking : 0;
     var ts     = new Date().toLocaleTimeString();
 
     return e('div', { key: 'hdr', style: { marginBottom: '6px' } }, [
@@ -265,10 +267,10 @@ function renderHeader(d, ns) {
             e('span', { key: 'r', style: { color: C.dim } }, ts),
         ]),
         e('div', { key: 'stats', style: { display: 'flex', gap: '16px', flexWrap: 'wrap' } }, [
-            statChip('tier', 'T' + tier,                          C.cyan),
-            statChip('hack', d.player.skills.hacking,             C.blue),
-            statChip('$',    fmtNum(money,  2),   C.green),
-            statChip('/s',   fmtNum(income, 2),   C.green),
+            statChip('tier', 'T' + tier,          C.cyan),
+            statChip('hack', hack,                 C.blue),
+            statChip('$',    fmtNum(money,  2),    C.green),
+            statChip('/s',   fmtNum(income, 2),    C.green),
         ]),
     ]);
 }
@@ -312,7 +314,7 @@ function ramPanel(label, used, max, pct, sub) {
         }, [
             e('span', { key: 'lbl', style: { color: C.dim, fontSize: '11px' } }, label),
             e('span', { key: 'val', style: { color: col } },
-                used.toFixed(0) + '/' + max.toFixed(0) + 'GB  ' + pctS + (sub ? '  ' + sub : '')),
+                (used || 0).toFixed(0) + '/' + (max || 0).toFixed(0) + 'GB  ' + pctS + (sub ? '  ' + sub : '')),
         ]),
         e('div', {
             key: 'bar',
@@ -325,7 +327,7 @@ function ramPanel(label, used, max, pct, sub) {
 
 
 // =============================================================================
-// Script controls — running scripts expanded, stopped scripts compact
+// Script controls
 // =============================================================================
 
 function renderScripts(d, ns) {
@@ -334,7 +336,6 @@ function renderScripts(d, ns) {
 
     var activeRows = active.map(function(m) { return scriptRowActive(m, ns); });
 
-    // Inactive scripts: compact 3-column grid — just name + tiny START button
     var inactiveGrid = inactive.length === 0 ? null :
         e('div', {
             key: 'inactive-grid',
@@ -430,7 +431,7 @@ function renderHWGW(d) {
 // Hacknet
 // =============================================================================
 
-function renderHacknet(d, ns) {
+function renderHacknet(d) {
     var hn = d.hacknetData;
     var content;
 
@@ -439,12 +440,12 @@ function renderHacknet(d, ns) {
     } else if (hn.isServerMode) {
         content = e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
             statChip('servers', hn.nodes,                                                          C.yellow),
-            statChip('H/s',     fmtNum(hn.totalIncome, 1),                         C.yellow),
-            statChip('hashes',  hn.hashes.toFixed(0) + '/' + hn.hashCapacity.toFixed(0),          C.purple),
+            statChip('H/s',     fmtNum(hn.totalIncome, 1),                                        C.yellow),
+            statChip('hashes',  (hn.hashes || 0).toFixed(0) + '/' + (hn.hashCapacity || 0).toFixed(0), C.purple),
         ]);
     } else {
         content = e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px' } }, [
-            statChip('nodes', hn.nodes,                                  C.yellow),
+            statChip('nodes', hn.nodes,                  C.yellow),
             statChip('$/s',   fmtNum(hn.totalIncome, 2), C.yellow),
         ]);
     }
@@ -474,27 +475,27 @@ function renderShare(d) {
 
 
 // =============================================================================
-// Corporation (only shown when corp exists)
+// Corporation
 // =============================================================================
 
-function renderCorp(d, ns) {
+function renderCorp(d) {
     var cd = d.corpData;
     return e('div', { key: 'corp', style: panel() }, [
         sectionHead('CORPORATION'),
         e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
             statChip('funds',  '$' + fmtNum(cd.funds,   2), C.green),
             statChip('rev/s',  '$' + fmtNum(cd.revenue, 2), C.green),
-            statChip('divs',   cd.divs,                                      C.cyan),
+            statChip('divs',   cd.divs,                      C.cyan),
         ]),
     ]);
 }
 
 
 // =============================================================================
-// Bladeburner (only shown when in BB)
+// Bladeburner
 // =============================================================================
 
-function renderBladeburner(d, ns) {
+function renderBladeburner(d) {
     var bb = d.bbData;
     return e('div', { key: 'bb', style: panel() }, [
         sectionHead('BLADEBURNER'),
@@ -583,9 +584,15 @@ export async function main(ns) {
     ns.ui.moveTail(winW - TAIL_W - TAIL_MARGIN, TAIL_MARGIN);
     ns.ui.setTailTitle('PhlanxOS  |  v' + VERSION);
 
-    ns.printRaw(e(Dashboard, { ns }));
+    // getData closure over sharedData — React reads this, no NS involved
+    function getData() { return sharedData; }
 
+    ns.printRaw(e(Dashboard, { ns, getData }));
+
+    // Main poll loop — the ONLY place NS functions are called.
+    // All NS calls here are in a valid async script context.
     while (true) {
-        await ns.sleep(60 * 60 * 1000);
+        try { collectData(ns); } catch (_) {}
+        await ns.sleep(POLL_MS);
     }
 }
