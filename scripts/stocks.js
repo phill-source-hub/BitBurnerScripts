@@ -65,7 +65,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.1';
+const VERSION     = '1.9.2';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
@@ -197,46 +197,42 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
         cooldown[sym] = Math.max(0, cooldown[sym] - 1);
     }
 
-    // Build enriched symbol list — update history and compute forecast
-    const symData = symbols.map(sym => {
-        const ask                       = ns.stock.getAskPrice(sym);
-        const bid                       = ns.stock.getBidPrice(sym);
-        const price                     = ns.stock.getPrice(sym);
-        const [longShares, longAvgPx,,] = ns.stock.getPosition(sym);
-        const maxShares                 = ns.stock.getMaxShares(sym);
-
-        // Update up/down history (skip flat ticks — price didn't move)
-        const prev = lastPrice[sym];
+    // Always update price history — even pre-4S, so window is full when 4S is purchased
+    for (const sym of symbols) {
+        const price = ns.stock.getPrice(sym);
+        const prev  = lastPrice[sym];
         lastPrice[sym] = price;
         if (prev !== undefined && price !== prev) {
             if (!upHistory[sym]) upHistory[sym] = [];
             upHistory[sym].push(price > prev);
             if (upHistory[sym].length > EST_WINDOW) upHistory[sym].shift();
         }
+    }
 
-        const history = upHistory[sym] || [];
+    const minHistory = symbols.reduce((m, sym) => Math.min(m, (upHistory[sym] || []).length), Infinity);
 
-        // Forecast: 4S gives exact value; otherwise estimate from up/down history
-        let forecast;
-        if (has4S) {
-            forecast = ns.stock.getForecast(sym);
-        } else if (history.length >= EST_MIN_TICKS) {
-            forecast = history.filter(Boolean).length / history.length;
-        } else {
-            forecast = null;  // not enough history yet
-        }
+    // Without 4S: build history silently, no trading
+    if (!has4S) {
+        const pct = Math.min(minHistory, EST_WINDOW);
+        ns.print('[STOCKS] LEARNING (' + pct + '/' + EST_WINDOW + ') — waiting for 4S data before trading.');
+        writePort(ns, { realised: stats.realised, unrealised: 0, positions: 0, buys: stats.buys, sells: stats.sells, mode: 'LEARNING ' + pct + '/' + EST_WINDOW });
+        return;
+    }
 
-        const signal = forecast !== null ? getForecastSignal(forecast) : 'hold';
-
-        return { sym, ask, bid, longShares, longAvgPx, maxShares, forecast, signal, histLen: history.length };
+    // 4S mode — build enriched symbol list with exact forecasts
+    const symData = symbols.map(sym => {
+        const ask                       = ns.stock.getAskPrice(sym);
+        const bid                       = ns.stock.getBidPrice(sym);
+        const [longShares, longAvgPx,,] = ns.stock.getPosition(sym);
+        const maxShares                 = ns.stock.getMaxShares(sym);
+        const forecast                  = ns.stock.getForecast(sym);
+        const signal                    = getForecastSignal(forecast);
+        return { sym, ask, bid, longShares, longAvgPx, maxShares, forecast, signal };
     });
 
-    // Determine mode for display
-    const minHistory = symData.reduce((m, d) => Math.min(m, d.histLen), Infinity);
-    const mode = has4S ? '4S' : minHistory >= EST_MIN_TICKS ? 'EST' : 'LEARNING';
-
-    let cashLeft     = player.money * (1 - moneyFloor);
-    const tradeCap   = player.money * TRADE_CAP_FRAC;
+    const mode = '4S';
+    let cashLeft   = player.money * (1 - moneyFloor);
+    const tradeCap = player.money * TRADE_CAP_FRAC;
     let cycleBuys = 0, cycleSells = 0;
     let unrealised = 0, openPositions = 0;
 
@@ -255,7 +251,7 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
         const profitOk     = profitIfSold > MIN_PROFIT;
 
         // Stop-loss: forecast strongly bearish OR price crashed below safety floor
-        const forecastStopLoss = forecast !== null && forecast < STOPLOSS;
+        const forecastStopLoss = forecast < STOPLOSS;
         const priceStopLoss    = longAvgPx > 0 && bid <= longAvgPx * (1 - PRICE_STOPLOSS_PCT);
 
         const shouldSell = (signal === 'sell' && profitOk)
@@ -300,7 +296,7 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
     if (canBuy) {
         const buyable = symData
             .filter(d => d.signal === 'buy')
-            .filter(d => has4S ? d.longShares < d.maxShares : d.longShares === 0)
+            .filter(d => d.longShares < d.maxShares)
             .filter(d => !cooldown[d.sym])
             .sort((a, b) => (b.forecast || 0) - (a.forecast || 0));
 
@@ -323,17 +319,15 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
                 cycleBuys++;
                 ns.print('[STOCKS] BUY  ' + sym + ' | shares:' + sharesToBuy +
                     ' | cost:' + ns.format.number(cost) +
-                    ' | f=' + (forecast !== null ? forecast.toFixed(2) : '?') +
-                    (has4S ? '' : '~'));
+                    ' | f=' + forecast.toFixed(2));
             }
         }
     }
 
     if (cycleBuys > 0 || cycleSells > 0) {
-        ns.print('[STOCKS] Cycle: ' + cycleBuys + ' buys, ' + cycleSells + ' sells | mode:' + mode);
+        ns.print('[STOCKS] Cycle: ' + cycleBuys + ' buys, ' + cycleSells + ' sells');
     } else {
-        const learningPct = has4S ? '' : ' (' + Math.min(minHistory, EST_MIN_TICKS) + '/' + EST_MIN_TICKS + ')';
-        ns.print('[STOCKS] Cycle: no trades | mode:' + mode + learningPct +
+        ns.print('[STOCKS] Cycle: no trades | mode:4S' +
             ' | open:' + openPositions +
             ' | unrealised:' + (unrealised >= 0 ? '+' : '') + ns.format.number(unrealised));
 
@@ -342,7 +336,7 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
             if (d.longShares <= 0) continue;
             const profitIfSold = (d.bid - d.longAvgPx) * d.longShares - 2 * COMMISSION;
             ns.print('  ' + d.sym
-                + ' f=' + (d.forecast !== null ? d.forecast.toFixed(2) + (has4S ? '' : '~') : '?')
+                + ' f=' + d.forecast.toFixed(2)
                 + ' sig:' + d.signal
                 + ' profit:' + (profitIfSold >= 0 ? '+' : '') + ns.format.number(profitIfSold));
         }
