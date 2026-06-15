@@ -55,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.8.3';
+const VERSION   = '1.8.4';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -239,7 +239,9 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
 
         const profitIfSold   = (bid - longAvgPx) * longShares - 2 * COMMISSION;
         const stopLoss4S     = has4S && forecast < STOPLOSS_4S;
-        const takeProfitTrend = !has4S && longAvgPx > 0 && bid >= longAvgPx * (1 + TREND_TAKEPROFIT_PCT);
+        const takeProfitTrend = !has4S && longAvgPx > 0
+            && bid >= longAvgPx * (1 + TREND_TAKEPROFIT_PCT)
+            && profitIfSold > 0;
         const stopLossTrend   = !has4S && longAvgPx > 0 && bid <= longAvgPx * (1 - TREND_STOPLOSS_PCT);
         const profitOk = profitIfSold > MIN_PROFIT_OVER_COMMISSION;
 
@@ -250,16 +252,15 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
             : takeProfitTrend || stopLossTrend;
 
         if (shouldSell) {
-            // Re-read bid immediately before selling — a market tick between the
-            // profitability check and sellStock can wipe the gain entirely.
-            // Stop-loss paths execute unconditionally (that's the point).
-            if (takeProfitTrend || (has4S && signal === 'sell' && profitOk)) {
+            // Re-read bid immediately before selling to guard against a market tick
+            // firing between the profitability check and sellStock execution.
+            // Stop-loss paths skip this — they execute unconditionally by design.
+            if (!stopLoss4S && !stopLossTrend) {
                 const liveBid          = ns.stock.getBidPrice(sym);
                 const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
-                const stillOk = takeProfitTrend
-                    ? liveBid >= longAvgPx * (1 + TREND_TAKEPROFIT_PCT)
-                    : liveProfitIfSold > MIN_PROFIT_OVER_COMMISSION;
-                if (!stillOk) continue;
+                const liveTakeProfit   = !has4S && liveBid >= longAvgPx * (1 + TREND_TAKEPROFIT_PCT) && liveProfitIfSold > 0;
+                const liveSignalOk     = has4S && liveProfitIfSold > MIN_PROFIT_OVER_COMMISSION;
+                if (!liveTakeProfit && !liveSignalOk) continue;
             }
             const proceeds = ns.stock.sellStock(sym, longShares);
             if (proceeds > 0) {
