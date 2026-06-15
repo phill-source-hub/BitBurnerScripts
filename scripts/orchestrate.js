@@ -1,6 +1,6 @@
 /**
  * orchestrate.js
- * Version: 1.4.0
+ * Version: 1.5.0
  *
  * Tier-aware HWGW batch scheduler and early-game grow/weaken dispatcher.
  *
@@ -21,9 +21,12 @@
  *     HACK mode: HWGW batches with precise landing delays:
  *       H  lands at t+0, WH at t+LAND_SPACING, G at t+2*LAND_SPACING,
  *       WG at t+3*LAND_SPACING.
- *     calcBatchThreads: binary search for largest steal% fitting RAM budget.
+ *     calcBatchThreads: uses ns.formulas.hacking when Formulas.exe is present
+ *       for exact grow thread counts (no binary search). Falls back to binary
+ *       search over growthAnalyze when Formulas.exe is absent.
  *     calcPrepThreads: Phase A (weaken-only when secDelta > 2) /
  *                      Phase B (grow + weaken when security near minimum).
+ *                      Uses formulas for exact grow threads when available.
  *     Phase 2: round-robin overflow batches across all prepped targets.
  *     Cycle-aware sleep: wakes at nearest cycleEnd timestamp.
  *     hackMode Set: targets receiving HACK are never given PREP on top.
@@ -31,7 +34,26 @@
  *     Port 2: peeked each cycle for new root events from auto-root.js.
  *     Port 1: written each cycle with timing data for status.js.
  *
+ * Formulas integration (v1.5.0):
+ *   Checks for Formulas.exe at startup and each cycle. When present:
+ *   - calcBatchThreads uses formulas.hacking.growThreads() with a mocked
+ *     post-hack server object for exact grow thread counts per steal fraction.
+ *   - calcPrepThreads uses formulas.hacking.growThreads() for exact prep grow counts.
+ *   - Binary search is replaced with a direct scan over steal fractions.
+ *   Uses bracket notation (ns['formulas']) to avoid static RAM cost when
+ *   Formulas.exe is absent — the static scanner does not see bracket access.
+ *
  * Changelog:
+ *   v1.6.0 - Ladder mode: fixed target progression until --ladder-threads capacity reached.
+ *            activePrepTarget now protected from mid-PREP eviction — only switches when
+ *            target is prepped, gone, or unhackable (not when new server ranks higher).
+ *            In dynamic mode, activePrepTarget preserved even if pushed outside top-N.
+ *   v1.5.0 - Add Formulas.exe integration. When present, calcBatchThreads uses
+ *            ns.formulas.hacking.growThreads() + hackPercent() for exact thread
+ *            counts, replacing binary search over growthAnalyze. calcPrepThreads
+ *            similarly uses formulas for grow. Falls back to v1.4.0 behaviour
+ *            when Formulas.exe absent. Bracket notation used throughout to keep
+ *            static RAM cost unchanged.
  *   v1.4.0 - Orchestrate now owns companion launch (auto-root, buy-servers).
  *            Bootstrap can't launch them at tier 1 (RAM too tight while bootstrap
  *            is resident). Orchestrate waits 1s for bootstrap to exit, launches
@@ -102,10 +124,25 @@ function isPrepped(ns, host) {
     return security <= minSecurity + 1 && money >= maxMoney * 0.99;
 }
 
+/**
+ * Returns the highest-priority ladder target that is rooted and hackable at current level.
+ * Falls back to n00dles if nothing else qualifies.
+ */
+function getLadderTarget(ns) {
+    const hackLevel = ns.getHackingLevel();
+    for (let i = TARGET_LADDER.length - 1; i >= 0; i--) {
+        const host = TARGET_LADDER[i];
+        try {
+            if (ns.hasRootAccess(host) && hackLevel >= ns.getServerRequiredHackingLevel(host)) return host;
+        } catch (_) {}
+    }
+    return TARGET_LADDER[0];
+}
+
 // --- Script paths ---
-const WORKER_SCRIPT   = 'scripts/worker.js';                                        // No leading slash — matches ns.exec() resolution
-const AUTOROOT_SCRIPT = 'scripts/auto-root.js';                                     // Launched by orchestrate after bootstrap exits (RAM constraint at tier 1)
-const BUY_SCRIPT      = 'scripts/buy-servers.js';                                   // Launched after auto-root single pass exits to free RAM
+const WORKER_SCRIPT   = 'scripts/worker.js';
+const AUTOROOT_SCRIPT = 'scripts/auto-root.js';
+const BUY_SCRIPT      = 'scripts/buy-servers.js';
 
 // --- Timing constants ---
 const LAND_SPACING  = 20;                                                           // ms between each HWGW job landing in sequence
@@ -115,160 +152,228 @@ const BATCH_SPACING = 100;                                                      
 const WORKER_RAM            = 2.0;                                                  // GB RAM cost per worker thread
 const MAX_TARGETS           = 5;                                                    // Maximum simultaneous hack targets in tier 1+
 const LOOP_SLEEP            = 200;                                                  // Minimum ms between scheduler cycles
-const SAFE_WEAKEN_PER_GROW  = 1 / 4;                                               // Conservative weaken ratio: 1 weaken per 4 grow threads
-const MIN_STEAL             = 0.01;                                                 // Minimum steal fraction (1%) for binary search
-const MAX_STEAL             = 0.50;                                                 // Maximum steal fraction (50%) for binary search
+const SAFE_WEAKEN_PER_GROW  = 1 / 4;                                               // Fallback weaken ratio when formulas unavailable
+const MIN_STEAL             = 0.01;                                                 // Minimum steal fraction (1%)
+const MAX_STEAL             = 0.50;                                                 // Maximum steal fraction (50%)
+const STEAL_STEP            = 0.005;                                                // Step size for formulas-mode steal scan
 
 // --- Tier 0 constants ---
-const GROW_RATIO   = 0.60;                                                          // 60% of home threads assigned to grow in tier 0
-const WEAKEN_RATIO = 0.40;                                                          // 40% of home threads assigned to weaken in tier 0
+const GROW_RATIO   = 0.60;
+const WEAKEN_RATIO = 0.40;
 
 // --- Port constants ---
-const PORT_STATUS  = 1;                                                             // Port orchestrate writes timing data to
-const PORT_AUTOROOT = 2;                                                            // Port auto-root writes new root events to (peek only)
+const PORT_STATUS   = 1;
+const PORT_AUTOROOT = 2;
+
+// --- Formulas.exe path ---
+const FORMULAS_EXE = 'Formulas.exe';
+
+// --- Early-game target ladder ---
+// Used when worker pool thread count is below LADDER_EXIT_THREADS.
+// Ordered low → high hack requirement; getLadderTarget picks the highest reachable entry.
+// Prevents wasteful PREP-switching when new servers get rooted.
+const TARGET_LADDER = [
+    'n00dles',         // hack 1   — starting target, minSec 1 = fastest PREP
+    'joesguns',        // hack 10
+    'hong-fang-tea',   // hack 30
+    'harakiri-sushi',  // hack 40
+    'neo-net',         // hack 50
+    'zer0',            // hack 75
+    'silver-helix',    // hack 150
+    'omega-net',       // hack 200
+    'avmnite-02h',     // hack 202
+    'I.I.I.I',         // hack 300
+    'run4theh111z',    // hack 505
+    'The-Cave',        // hack 750
+];
+const DEFAULT_LADDER_THREADS = 200;                                                 // Thread count above which ladder exits and dynamic scoring takes over
 
 
 // =============================================================================
 // Thread pool helpers
 // =============================================================================
 
-/**
- * Attempts to allocate threadsNeeded threads from the pool.
- * Fills largest servers first to minimise ns.exec() call count.
- * Does not mutate the pool — call applyAllocation to commit.
- * @param {Array<{host: string, available: number}>} pool
- * @param {number} threadsNeeded
- * @returns {Array<{host: string, threads: number}>|null} Allocations or null if insufficient RAM
- */
 function allocate(pool, threadsNeeded) {
-    const result    = [];                                                            // Allocations accumulator
-    let   remaining = threadsNeeded;                                                // Threads still to fill
+    const result    = [];
+    let   remaining = threadsNeeded;
 
-    for (const slot of pool) {                                                      // Iterate largest-first (pool is pre-sorted)
-        if (remaining <= 0) break;                                                  // Fully allocated
-        if (slot.available <= 0) continue;                                          // Server exhausted — skip
+    for (const slot of pool) {
+        if (remaining <= 0) break;
+        if (slot.available <= 0) continue;
 
-        const take = Math.min(slot.available, remaining);                           // Take what's available up to need
+        const take = Math.min(slot.available, remaining);
         result.push({ host: slot.host, threads: take });
         remaining -= take;
     }
 
-    if (remaining > 0) return null;                                                 // Not enough RAM across pool
+    if (remaining > 0) return null;
     return result;
 }
 
-/**
- * Commits allocations to the pool, reducing available thread counts.
- * @param {Array<{host: string, available: number}>} pool
- * @param {Array<{host: string, threads: number}>} allocations
- */
 function applyAllocation(pool, allocations) {
     for (const alloc of allocations) {
         const slot = pool.find(s => s.host === alloc.host);
-        if (slot) slot.available -= alloc.threads;                                  // Deduct committed threads from pool slot
+        if (slot) slot.available -= alloc.threads;
     }
 }
 
-/**
- * Returns allocated threads to the pool.
- * Used to roll back a partial allocation when a batch cannot be completed.
- * @param {Array<{host: string, available: number}>} pool
- * @param {Array<{host: string, threads: number}>} allocations
- */
 function freeAllocation(pool, allocations) {
     for (const alloc of allocations) {
         const slot = pool.find(s => s.host === alloc.host);
-        if (slot) slot.available += alloc.threads;                                  // Return threads to pool slot
+        if (slot) slot.available += alloc.threads;
     }
 }
 
 
 // =============================================================================
-// Batch calculation
+// Batch calculation — formulas mode
 // =============================================================================
 
 /**
- * Calculates thread counts for a single HWGW batch on a prepped target.
- * Uses binary search to find the largest steal fraction fitting maxThreads.
- * Grow weaken uses SAFE_WEAKEN_PER_GROW ratio (1/4) rather than
- * growthAnalyzeSecurity() which underestimates in-game security increase ~3x.
- * Returns null if even MIN_STEAL fraction exceeds maxThreads or state invalid.
+ * Exact batch thread calculation using ns.formulas.hacking.
+ * Scans steal fractions from MAX_STEAL down to MIN_STEAL in STEAL_STEP increments.
+ * Each iteration is O(1) and exact — no estimation or binary search needed.
+ * Requires Formulas.exe. Uses bracket notation to avoid static RAM cost.
  * @param {NS} ns
  * @param {string} target
- * @param {number} maxThreads - Thread budget for this batch
+ * @param {number} maxThreads
  * @returns {{hackThreads, weakenHThreads, growThreads, weakenGThreads, totalThreads, stealFraction}|null}
  */
-function calcBatchThreads(ns, target, maxThreads) {
-    const maxMoney        = ns.getServerMaxMoney(target);                           // Max money — assumes target is fully prepped
-    const weakenPerThread = ns.weakenAnalyze(1);                                    // Security reduction per weaken thread
+function calcBatchThreadsFormulas(ns, target, maxThreads) {
+    const server           = ns.getServer(target);
+    const player           = ns.getPlayer();
+    const formulas         = ns['formulas']['hacking'];                             // Bracket notation — no static RAM cost
+    const weakenPerThread  = ns.weakenAnalyze(1);
+    const hackPct          = formulas['hackPercent'](server, player);               // Fraction stolen per hack thread
 
-    /**
-     * Calculate total threads required for a given steal fraction.
-     * @param {number} fraction - Fraction of maxMoney to steal (0–1)
-     * @returns {object|null} Thread counts and total, or null if state invalid
-     */
-    function threadsForSteal(fraction) {
-        const rawHack = ns.hackAnalyzeThreads(target, maxMoney * fraction);         // Raw hack threads for this steal amount
-        if (!isFinite(rawHack) || rawHack < 0) return null;                        // Invalid target state — $0 or NaN
-        const hackThreads    = Math.max(1, Math.floor(rawHack));                    // Whole threads, minimum 1
-        const hackSecInc     = ns.hackAnalyzeSecurity(hackThreads, target);         // Security raised by hack
-        const weakenHThreads = Math.ceil(hackSecInc / weakenPerThread);             // Threads to cancel hack's security increase
-        const growMult       = Math.max(1.001, 1 / (1 - fraction));                // Multiplier to restore money after steal
-        const growThreads    = Math.ceil(ns.growthAnalyze(target, growMult));       // Threads to restore money to max
-        const weakenGThreads = Math.ceil(growThreads * SAFE_WEAKEN_PER_GROW) + 1;  // Safe-ratio weaken for grow's security increase
-        const totalThreads   = hackThreads + weakenHThreads + growThreads + weakenGThreads;
-        return { hackThreads, weakenHThreads, growThreads, weakenGThreads, totalThreads, stealFraction: fraction };
-    }
+    if (!hackPct || hackPct <= 0) return null;
 
-    // Guard: if minimum steal fraction is invalid or exceeds budget, bail out
-    const minResult = threadsForSteal(MIN_STEAL);
-    if (!minResult) {
-        log(ns, 'calcBatchThreads: invalid state for ' + target + ' — hackAnalyzeThreads returned NaN/-1');
-        return null;
-    }
-    if (minResult.totalThreads > maxThreads) return null;                           // Even 1% steal doesn't fit — caller skips
+    const maxMoney = server.moneyMax;
+    if (!maxMoney || maxMoney <= 0) return null;
 
-    // Binary search: find largest steal fraction that fits within maxThreads
-    let lo   = MIN_STEAL;                                                           // Known-good lower bound
-    let hi   = MAX_STEAL;                                                           // Upper bound — may not fit
-    let best = minResult;                                                           // Track best result found
+    let best = null;
 
-    for (let i = 0; i < 20; i++) {                                                  // 20 iterations → ~0.0000001 precision
-        const mid    = (lo + hi) / 2;
-        const result = threadsForSteal(mid);
-        if (result && result.totalThreads <= maxThreads) {
-            best = result;                                                           // Fits — try higher steal
-            lo   = mid;
-        } else {
-            hi = mid;                                                               // Doesn't fit — lower upper bound
+    // Scan from high steal% down to find largest fraction fitting maxThreads
+    for (let fraction = MAX_STEAL; fraction >= MIN_STEAL; fraction -= STEAL_STEP) {
+        const hackThreads = Math.max(1, Math.ceil(fraction / hackPct));
+
+        const hackSecInc     = ns.hackAnalyzeSecurity(hackThreads, target);
+        const weakenHThreads = Math.ceil(hackSecInc / weakenPerThread);
+
+        // Mock server with post-hack money to get exact grow threads needed
+        const postHackServer               = Object.assign({}, server);
+        postHackServer.moneyAvailable      = Math.max(1, maxMoney * (1 - fraction));
+
+        const growThreads    = Math.ceil(formulas['growThreads'](postHackServer, player, maxMoney));
+        const growSecInc     = ns.growthAnalyzeSecurity(growThreads, target, 1);
+        const weakenGThreads = Math.ceil(growSecInc / weakenPerThread) + 1;        // +1 rounding buffer
+
+        const totalThreads = hackThreads + weakenHThreads + growThreads + weakenGThreads;
+
+        if (totalThreads <= maxThreads) {
+            best = { hackThreads, weakenHThreads, growThreads, weakenGThreads, totalThreads, stealFraction: fraction };
+            break;                                                                  // First (highest) fraction that fits is optimal
         }
     }
 
     return best;
 }
 
+
+// =============================================================================
+// Batch calculation — fallback mode (binary search)
+// =============================================================================
+
 /**
- * Calculates grow + weaken threads for a PREP cycle (no hack).
- * Weaken-first strategy:
- *   Phase A (secDelta > 2): dedicate all threads to weaken only. High security
- *     slows all operations; clearing it first is fastest path to ready state.
- *   Phase B (secDelta <= 2): grow money to max plus weaken to cover grow's
- *     security increase. Scaled proportionally if over threadsRemaining budget.
+ * Binary search batch calculation. Used when Formulas.exe is absent.
+ * SAFE_WEAKEN_PER_GROW ratio (1/4) used instead of growthAnalyzeSecurity
+ * which can underestimate in-game security increase.
  * @param {NS} ns
  * @param {string} target
- * @param {number} threadsRemaining - Thread budget available this cycle
+ * @param {number} maxThreads
+ * @returns {{hackThreads, weakenHThreads, growThreads, weakenGThreads, totalThreads, stealFraction}|null}
+ */
+function calcBatchThreadsFallback(ns, target, maxThreads) {
+    const maxMoney        = ns.getServerMaxMoney(target);
+    const weakenPerThread = ns.weakenAnalyze(1);
+
+    function threadsForSteal(fraction) {
+        const rawHack = ns.hackAnalyzeThreads(target, maxMoney * fraction);
+        if (!isFinite(rawHack) || rawHack < 0) return null;
+        const hackThreads    = Math.max(1, Math.floor(rawHack));
+        const hackSecInc     = ns.hackAnalyzeSecurity(hackThreads, target);
+        const weakenHThreads = Math.ceil(hackSecInc / weakenPerThread);
+        const growMult       = Math.max(1.001, 1 / (1 - fraction));
+        const growThreads    = Math.ceil(ns.growthAnalyze(target, growMult));
+        const weakenGThreads = Math.ceil(growThreads * SAFE_WEAKEN_PER_GROW) + 1;
+        const totalThreads   = hackThreads + weakenHThreads + growThreads + weakenGThreads;
+        return { hackThreads, weakenHThreads, growThreads, weakenGThreads, totalThreads, stealFraction: fraction };
+    }
+
+    const minResult = threadsForSteal(MIN_STEAL);
+    if (!minResult) {
+        log(ns, 'calcBatchThreads: invalid state for ' + target + ' — hackAnalyzeThreads returned NaN/-1');
+        return null;
+    }
+    if (minResult.totalThreads > maxThreads) return null;
+
+    let lo   = MIN_STEAL;
+    let hi   = MAX_STEAL;
+    let best = minResult;
+
+    for (let i = 0; i < 20; i++) {
+        const mid    = (lo + hi) / 2;
+        const result = threadsForSteal(mid);
+        if (result && result.totalThreads <= maxThreads) {
+            best = result;
+            lo   = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    return best;
+}
+
+
+/**
+ * Dispatch to the appropriate batch calculation mode.
+ * @param {NS} ns
+ * @param {string} target
+ * @param {number} maxThreads
+ * @param {boolean} hasFormulas
+ */
+function calcBatchThreads(ns, target, maxThreads, hasFormulas) {
+    return hasFormulas
+        ? calcBatchThreadsFormulas(ns, target, maxThreads)
+        : calcBatchThreadsFallback(ns, target, maxThreads);
+}
+
+
+// =============================================================================
+// Prep calculation
+// =============================================================================
+
+/**
+ * Calculates grow + weaken threads for a PREP cycle (no hack).
+ * Uses formulas.hacking.growThreads when Formulas.exe present for exact counts.
+ * Falls back to growthAnalyze with conservative weaken ratio when absent.
+ * @param {NS} ns
+ * @param {string} target
+ * @param {number} threadsRemaining
+ * @param {boolean} hasFormulas
  * @returns {{growThreads: number, weakenThreads: number, totalThreads: number, phase: string}}
  */
-function calcPrepThreads(ns, target, threadsRemaining) {
-    const weakenPerThread = ns.weakenAnalyze(1);                                    // Security reduction per weaken thread
+function calcPrepThreads(ns, target, threadsRemaining, hasFormulas) {
+    const weakenPerThread = ns.weakenAnalyze(1);
     const security        = ns.getServerSecurityLevel(target);
     const minSecurity     = ns.getServerMinSecurityLevel(target);
-    const secDelta        = Math.max(0, security - minSecurity);                    // Security above minimum
+    const secDelta        = Math.max(0, security - minSecurity);
 
     // Phase A: security badly elevated — weaken only until near minimum
     if (secDelta > 2) {
-        const fullWeaken  = Math.ceil(secDelta / weakenPerThread);                  // Threads to fully clear security
-        const weakenThreads = Math.min(fullWeaken, threadsRemaining);               // Cap to budget
+        const fullWeaken    = Math.ceil(secDelta / weakenPerThread);
+        const weakenThreads = Math.min(fullWeaken, threadsRemaining);
         return { growThreads: 0, weakenThreads, totalThreads: weakenThreads, phase: 'A' };
     }
 
@@ -279,18 +384,26 @@ function calcPrepThreads(ns, target, threadsRemaining) {
     let growThreads   = 0;
     let weakenThreads = 0;
 
-    if (money < maxMoney * 0.99) {                                                  // Only grow if below 99% max
-        const growMult  = money > 0
-            ? maxMoney / money                                                      // Multiplier to reach max money
-            : 1e6;                                                                  // Server is empty — use large multiplier (capped below)
-        // Cap grow multiplier to prevent astronomically large thread counts on $0 servers
-        const safeMult  = Math.min(growMult, 1e6);
-        growThreads     = Math.ceil(ns.growthAnalyze(target, Math.max(1.001, safeMult)));
-        const growSecEst    = growThreads * SAFE_WEAKEN_PER_GROW * weakenPerThread; // Estimated security increase from grow
-        const totalSecEst   = secDelta + growSecEst;                                // Existing delta + grow's contribution
-        weakenThreads       = Math.ceil(totalSecEst / weakenPerThread) + 1;         // +1 rounding buffer
+    if (money < maxMoney * 0.99) {
+        if (hasFormulas) {
+            // Exact grow threads via formulas
+            const server              = ns.getServer(target);
+            const player              = ns.getPlayer();
+            server.moneyAvailable     = Math.max(1, money);
+            growThreads               = Math.ceil(ns['formulas']['hacking']['growThreads'](server, player, maxMoney));
+            const growSecInc          = ns.growthAnalyzeSecurity(growThreads, target, 1);
+            const totalSecEst         = secDelta + growSecInc;
+            weakenThreads             = Math.ceil(totalSecEst / weakenPerThread) + 1;
+        } else {
+            // Fallback: growthAnalyze with conservative weaken ratio
+            const growMult  = money > 0 ? maxMoney / money : 1e6;
+            const safeMult  = Math.min(growMult, 1e6);
+            growThreads     = Math.ceil(ns.growthAnalyze(target, Math.max(1.001, safeMult)));
+            const growSecEst    = growThreads * SAFE_WEAKEN_PER_GROW * weakenPerThread;
+            const totalSecEst   = secDelta + growSecEst;
+            weakenThreads       = Math.ceil(totalSecEst / weakenPerThread) + 1;
+        }
     } else {
-        // Money at max — only clear residual security if any
         weakenThreads = secDelta > 0 ? Math.ceil(secDelta / weakenPerThread) + 1 : 0;
     }
 
@@ -298,10 +411,10 @@ function calcPrepThreads(ns, target, threadsRemaining) {
 
     // Scale down proportionally if over budget
     if (totalThreads > threadsRemaining && threadsRemaining > 0) {
-        const existingWeakenCost = Math.ceil(secDelta / weakenPerThread) + 1;       // Threads to cover existing delta
-        const budgetForGrow      = threadsRemaining - existingWeakenCost;           // Remaining budget after reserving weaken
+        const existingWeakenCost = Math.ceil(secDelta / weakenPerThread) + 1;
+        const budgetForGrow      = threadsRemaining - existingWeakenCost;
         growThreads   = growThreads > 0 && budgetForGrow > 0
-            ? Math.max(1, Math.floor(budgetForGrow / (1 + SAFE_WEAKEN_PER_GROW)))  // Scale grow to fit with its weaken share
+            ? Math.max(1, Math.floor(budgetForGrow / (1 + SAFE_WEAKEN_PER_GROW)))
             : 0;
         weakenThreads = growThreads > 0
             ? Math.ceil((secDelta + growThreads * SAFE_WEAKEN_PER_GROW * weakenPerThread) / weakenPerThread) + 1
@@ -317,16 +430,6 @@ function calcPrepThreads(ns, target, threadsRemaining) {
 // Worker launching
 // =============================================================================
 
-/**
- * Launches one ns.exec() call per allocation entry.
- * Operation and delay are passed as positional args to worker.js.
- * Logs exec failures — these are transient RAM contention and resolve next cycle.
- * @param {NS} ns
- * @param {string} operation - 'hack', 'grow', or 'weaken'
- * @param {Array<{host: string, threads: number}>} allocations
- * @param {string} target - Target hostname
- * @param {number} delay - ms delay before worker executes operation
- */
 function launchWorkers(ns, operation, allocations, target, delay) {
     for (const alloc of allocations) {
         const pid = ns.exec(
@@ -335,9 +438,9 @@ function launchWorkers(ns, operation, allocations, target, delay) {
             alloc.threads,
             target,
             operation,
-            '--delay', Math.max(0, delay),                                          // Ensure delay is never negative
+            '--delay', Math.max(0, delay),
         );
-        if (pid === 0) {                                                             // PID 0 = exec failed
+        if (pid === 0) {
             log(ns, '[EXEC FAIL] ' + operation + ' on ' + alloc.host + ' t:' + alloc.threads + ' — RAM contention, resolves next cycle');
         }
     }
@@ -348,27 +451,18 @@ function launchWorkers(ns, operation, allocations, target, delay) {
 // Tier 0 — early mode
 // =============================================================================
 
-/**
- * Tier 0 early-mode loop. Runs entirely on home with minimal RAM footprint.
- * Dispatches grow + weaken threads on home using free RAM after own script cost.
- * Exits when tier rises (restarts self) or worker servers become available.
- * @param {NS} ns
- */
 async function runTier0(ns) {
-    ns.tprint('=== orchestrate.js v1.3.0 | TIER 0 early mode ===');
+    ns.tprint('=== orchestrate.js v1.6.0 | TIER 0 early mode ===');
 
-    const selfRam   = ns.getScriptRam('orchestrate.js', 'home');                    // Own RAM cost — excluded from worker budget
-    const cycleEnds = {};                                                            // Per-target cycleEnd timestamps
+    const cycleEnds = {};
 
     while (true) {
-        // Check if tier has risen — restart in full mode
         if (getRamTier(ns) > 0) {
             ns.tprint('[ORCHESTRATE] Tier risen — restarting in full HWGW mode');
-            ns.exec('scripts/orchestrate.js', 'home', 1);                           // Launch fresh instance — it will detect tier 1+
-            return;                                                                  // Exit tier 0 loop
+            ns.exec('scripts/orchestrate.js', 'home', 1);
+            return;
         }
 
-        // Check if worker servers now available — switch to using them
         const workers = getWorkerServers(ns);
         if (workers.length > 0) {
             ns.tprint('[ORCHESTRATE] Worker servers detected — restarting in full HWGW mode');
@@ -376,7 +470,6 @@ async function runTier0(ns) {
             return;
         }
 
-        // Select single best target
         const targets = getRankedTargets(ns);
         if (targets.length === 0) {
             log(ns, 'Tier 0: no valid targets — waiting');
@@ -385,11 +478,10 @@ async function runTier0(ns) {
         }
         const target = targets[0];
 
-        // Calculate free home RAM available for worker threads
         const maxRam  = ns.getServerMaxRam('home');
         const usedRam = ns.getServerUsedRam('home');
-        const freeRam = maxRam - usedRam;                                           // Remaining RAM after all running scripts
-        const threads = Math.floor(freeRam / WORKER_RAM);                           // How many worker threads fit
+        const freeRam = maxRam - usedRam;
+        const threads = Math.floor(freeRam / WORKER_RAM);
 
         if (threads < 1) {
             log(ns, 'Tier 0: insufficient home RAM for workers — waiting');
@@ -397,7 +489,6 @@ async function runTier0(ns) {
             continue;
         }
 
-        // Skip if cycle still in flight for this target
         const now = Date.now();
         if (cycleEnds[target.host] && cycleEnds[target.host] > now) {
             const remaining = cycleEnds[target.host] - now;
@@ -406,21 +497,18 @@ async function runTier0(ns) {
             continue;
         }
 
-        // Split threads 60% grow / 40% weaken
         const growThreads   = Math.max(1, Math.floor(threads * GROW_RATIO));
-        const weakenThreads = Math.max(1, threads - growThreads);                   // Remaining threads go to weaken
+        const weakenThreads = Math.max(1, threads - growThreads);
 
-        // Launch grow then weaken on home
         const growPid   = ns.exec(WORKER_SCRIPT, 'home', growThreads,   target.host, 'grow',   '--delay', 0);
         const weakenPid = ns.exec(WORKER_SCRIPT, 'home', weakenThreads, target.host, 'weaken', '--delay', 0);
 
         if (growPid   === 0) log(ns, 'Tier 0: grow exec failed on home');
         if (weakenPid === 0) log(ns, 'Tier 0: weaken exec failed on home');
 
-        const weakenTime      = ns.getWeakenTime(target.host);
-        cycleEnds[target.host] = now + weakenTime + 500;                            // +500ms buffer for grow/weaken to land
+        const weakenTime       = ns.getWeakenTime(target.host);
+        cycleEnds[target.host] = now + weakenTime + 500;
 
-        // Write basic timing to port 1 for status.js — clear first so port never fills
         clearPort(ns, PORT_STATUS);
         writePort(ns, PORT_STATUS, {
             cycleStart : now,
@@ -438,40 +526,27 @@ async function runTier0(ns) {
 // Tier 1+ — full HWGW mode
 // =============================================================================
 
-/**
- * Full HWGW mode. Runs on tier 1+ home, workers on purchased/rooted servers only.
- * @param {NS} ns
- */
-async function runFullMode(ns) {
-    ns.tprint('=== orchestrate.js v1.3.0 | TIER ' + getRamTier(ns) + ' full HWGW mode ===');
+async function runFullMode(ns, ladderThreads) {
+    ns.tprint('=== orchestrate.js v1.6.0 | TIER ' + getRamTier(ns) + ' full HWGW mode ===');
 
-    const scpDone    = new Set();                                                   // Servers that have received worker.js this session
-    const cycleEnds  = {};                                                          // host -> expected cycleEnd timestamp
-    const hackMode   = new Set();                                                   // Targets that have received HACK batches
-    let activePrepTarget = null;                                                     // Serialised PREP: one target at a time
+    const scpDone    = new Set();
+    const cycleEnds  = {};
+    const hackMode   = new Set();
+    let activePrepTarget = null;
 
     while (true) {
 
-        // If tier has dropped back to 0 (e.g. augment reset mid-run), restart in tier 0
         if (getRamTier(ns) === 0) {
             ns.tprint('[ORCHESTRATE] Tier dropped to 0 — restarting in early mode');
             ns.exec('scripts/orchestrate.js', 'home', 1);
             return;
         }
 
-        // Refresh targets and worker farm each cycle
-        const workerList = getWorkerServers(ns);                                    // Rooted non-home servers, largest-first
-        const targets    = getRankedTargets(ns).slice(0, MAX_TARGETS);              // Top N targets by score
+        // Check Formulas.exe each cycle — player may acquire it mid-run
+        const hasFormulas = ns.fileExists(FORMULAS_EXE, 'home');
 
-        if (targets.length === 0) {
-            log(ns, 'No valid targets — waiting');
-            await ns.sleep(5000);
-            continue;
-        }
+        const workerList = getWorkerServers(ns);
 
-        // SCP worker.js to any server not yet confirmed this session.
-        // Covers: purchased servers (auto-root skips cloud-server hosts) and any
-        // rooted servers that joined before this orchestrate instance started.
         for (const host of workerList) {
             if (!scpDone.has(host)) {
                 const ok = await ns.scp(WORKER_SCRIPT, host, 'home');
@@ -480,7 +555,6 @@ async function runFullMode(ns) {
             }
         }
 
-        // Build thread pool from servers with worker.js confirmed
         const pool = workerList
             .filter(host => scpDone.has(host))
             .map(host => ({
@@ -489,59 +563,98 @@ async function runFullMode(ns) {
                     (ns.getServerMaxRam(host) - ns.getServerUsedRam(host)) / WORKER_RAM
                 ),
             }))
-            .filter(slot => slot.available > 0);                                    // Exclude servers with no free RAM
+            .filter(slot => slot.available > 0);
 
         const totalAvailableThreads = pool.reduce((s, p) => s + p.available, 0);
         let   threadsRemaining      = totalAvailableThreads;
         let   batchesLaunched       = 0;
         let   prepLaunched          = 0;
-        const targetTiming          = {};                                            // Timing payload for port 1
+        const targetTiming          = {};
 
         const now = Date.now();
 
-        // Cache isPrepped per target — hackMode targets always treated as prepped
-        // (their HWGW batch handles restoration; PREP on top would conflict)
+        // Total theoretical capacity (used for ladder mode decision, independent of current usage)
+        const totalWorkerThreads = workerList.reduce((s, h) =>
+            s + Math.floor(ns.getServerMaxRam(h) / WORKER_RAM), 0);
+        const useLadder = totalWorkerThreads < ladderThreads;
+
+        // Build target list: ladder mode keeps active hack targets + one prep target;
+        // dynamic mode uses top-N by score, preserving activePrepTarget if near the cut.
+        const allRanked = getRankedTargets(ns);
+        let targets;
+        if (useLadder) {
+            const ladderHost  = getLadderTarget(ns);
+            const hackingNow  = allRanked.filter(t => hackMode.has(t.host));
+            const alreadySet  = new Set(hackingNow.map(t => t.host));
+            targets = [...hackingNow];
+            if (ladderHost && !alreadySet.has(ladderHost)) {
+                const entry = allRanked.find(t => t.host === ladderHost) ||
+                    { host: ladderHost, score: 0, maxMoney: ns.getServerMaxMoney(ladderHost), weakenTime: ns.getWeakenTime(ladderHost) };
+                targets.push(entry);
+            }
+            log(ns, '[LADDER] threads=' + totalWorkerThreads + '/' + ladderThreads + ' target=' + (ladderHost || 'none'));
+        } else {
+            targets = allRanked.slice(0, MAX_TARGETS);
+            // Keep activePrepTarget in list even if a newly-rooted server pushed it outside top-N
+            if (activePrepTarget && !targets.find(t => t.host === activePrepTarget)) {
+                const preserved = allRanked.find(t => t.host === activePrepTarget);
+                if (preserved) targets.push(preserved);
+            }
+        }
+
+        if (targets.length === 0) {
+            log(ns, 'No valid targets — waiting');
+            await ns.sleep(5000);
+            continue;
+        }
+
         const preppedCache = {};
         for (const t of targets) {
             preppedCache[t.host] = hackMode.has(t.host) || isPrepped(ns, t.host);
         }
 
-        // Update activePrepTarget only when necessary — avoid mid-prep switching
-        const targetHosts = new Set(targets.map(t => t.host));
-        if (
-            activePrepTarget === null ||
-            !targetHosts.has(activePrepTarget) ||
-            preppedCache[activePrepTarget]
-        ) {
-            // Pick next unprepped non-hackMode target
-            activePrepTarget = (targets.find(t => !preppedCache[t.host] && !hackMode.has(t.host)) || {}).host || null;
-            if (activePrepTarget) log(ns, '[PREP TARGET] ' + activePrepTarget);
+        // Only switch activePrepTarget when it's actually done or inaccessible —
+        // not just because a newly-rooted server ranked higher this cycle.
+        let needNewPrepTarget = (activePrepTarget === null);
+        if (!needNewPrepTarget) {
+            const inCache = Object.prototype.hasOwnProperty.call(preppedCache, activePrepTarget);
+            const isDone  = inCache ? preppedCache[activePrepTarget] : isPrepped(ns, activePrepTarget);
+            needNewPrepTarget = isDone;
+            if (!needNewPrepTarget) {
+                try { needNewPrepTarget = !ns.hasRootAccess(activePrepTarget) || !canHack(ns, activePrepTarget); }
+                catch (_) { needNewPrepTarget = true; }
+            }
+        }
+        if (needNewPrepTarget) {
+            const next     = targets.find(t => !preppedCache[t.host] && !hackMode.has(t.host));
+            const nextHost = next ? next.host : null;
+            if (nextHost !== activePrepTarget) {
+                activePrepTarget = nextHost;
+                if (activePrepTarget) log(ns, '[PREP TARGET] → ' + activePrepTarget);
+            }
         }
 
-        // Check port 2 for new root events from auto-root.js (non-consuming peek)
         const rootEvent = readPort(ns, PORT_AUTOROOT);
         if (rootEvent) {
             log(ns, 'New root detected: ' + rootEvent.host + ' — SCP will cover next cycle');
         }
 
-        log(ns, '--- cycle | threads: ' + totalAvailableThreads + ' | targets: ' + targets.length + ' ---');
+        log(ns, '--- cycle | threads: ' + totalAvailableThreads + ' | targets: ' + targets.length + ' | formulas: ' + hasFormulas + ' ---');
 
         // --- Phase 1 Pass 1: HACK batches for all prepped targets ---
         for (const t of targets) {
             if (threadsRemaining <= 0) break;
 
-            // Skip if previous batch still in flight
             if (cycleEnds[t.host] && cycleEnds[t.host] > now) {
                 log(ns, '[SKIP] ' + t.host + ' — cycle ends in ' + formatTime(cycleEnds[t.host] - now));
                 continue;
             }
 
-            if (!preppedCache[t.host]) continue;                                    // Not prepped — handled in Pass 2
+            if (!preppedCache[t.host]) continue;
 
-            const batch = calcBatchThreads(ns, t.host, threadsRemaining);
+            const batch = calcBatchThreads(ns, t.host, threadsRemaining, hasFormulas);
             if (!batch) {
                 if (hackMode.has(t.host)) {
-                    // Money depleted mid-flight — grow still in-flight, extend cycleEnd to wait
                     const wt = ns.getWeakenTime(t.host);
                     cycleEnds[t.host] = now + wt;
                     log(ns, '[WAIT-HACK] ' + t.host + ' — money depleted, waiting for grow');
@@ -551,7 +664,6 @@ async function runFullMode(ns) {
                 continue;
             }
 
-            // Allocate all four job types — roll back cleanly on any failure
             const hackAlloc = allocate(pool, batch.hackThreads);
             if (!hackAlloc) continue;
             applyAllocation(pool, hackAlloc);
@@ -573,15 +685,14 @@ async function runFullMode(ns) {
             }
             applyAllocation(pool, weakenGAlloc);
 
-            // Calculate delays so all four jobs land in strict H→WH→G→WG order
-            const weakenTime  = ns.getWeakenTime(t.host);                          // Reference duration (slowest op)
-            const hackTime    = ns.getHackTime(t.host);
-            const growTime    = ns.getGrowTime(t.host);
+            const weakenTime = ns.getWeakenTime(t.host);
+            const hackTime   = ns.getHackTime(t.host);
+            const growTime   = ns.getGrowTime(t.host);
 
-            const hackDelay    = weakenTime - hackTime   - LAND_SPACING;           // H fires late, lands LAND_SPACING before WH
-            const weakenHDelay = 0;                                                 // WH fires immediately — reference point
-            const growDelay    = weakenTime - growTime   + LAND_SPACING;           // G lands LAND_SPACING after WH
-            const weakenGDelay = LAND_SPACING * 2;                                  // WG fires 2 spacings after WH fires
+            const hackDelay    = weakenTime - hackTime  - LAND_SPACING;
+            const weakenHDelay = 0;
+            const growDelay    = weakenTime - growTime  + LAND_SPACING;
+            const weakenGDelay = LAND_SPACING * 2;
 
             launchWorkers(ns, 'hack',   hackAlloc,    t.host, hackDelay);
             launchWorkers(ns, 'weaken', weakenHAlloc, t.host, weakenHDelay);
@@ -590,10 +701,10 @@ async function runFullMode(ns) {
 
             threadsRemaining  -= batch.totalThreads;
             batchesLaunched++;
-            hackMode.add(t.host);                                                   // Mark HACK — prevents PREP dispatch on top
+            hackMode.add(t.host);
 
-            cycleEnds[t.host]     = now + weakenTime + LAND_SPACING * 4;           // Full cycle duration
-            targetTiming[t.host]  = { weakenTime, mode: 'HACK' };
+            cycleEnds[t.host]    = now + weakenTime + LAND_SPACING * 4;
+            targetTiming[t.host] = { weakenTime, mode: 'HACK' };
 
             log(ns, '[HACK] ' + t.host + ' | steal:' + (batch.stealFraction * 100).toFixed(1) + '% | H:' + batch.hackThreads + ' WH:' + batch.weakenHThreads + ' G:' + batch.growThreads + ' WG:' + batch.weakenGThreads + ' | total:' + batch.totalThreads + ' | cycle:' + formatTime(weakenTime));
         }
@@ -603,14 +714,12 @@ async function runFullMode(ns) {
             const t = targets.find(t => t.host === activePrepTarget);
 
             if (t && !preppedCache[t.host]) {
-                // Silent skip if cycle still in flight — Pass 1 already logged SKIP
                 const cycleActive = cycleEnds[t.host] && cycleEnds[t.host] > now;
 
                 if (!cycleActive) {
-                    const prep = calcPrepThreads(ns, t.host, threadsRemaining);
+                    const prep = calcPrepThreads(ns, t.host, threadsRemaining, hasFormulas);
 
                     if (prep.totalThreads > 0) {
-                        // Allocate weaken first to prevent server overlap with grow
                         const weakenAlloc = prep.weakenThreads > 0 ? allocate(pool, prep.weakenThreads) : [];
                         if (prep.weakenThreads > 0 && !weakenAlloc) {
                             log(ns, '[PREP] ' + t.host + ' — insufficient RAM for weaken');
@@ -627,7 +736,6 @@ async function runFullMode(ns) {
 
                                 const weakenTime  = ns.getWeakenTime(t.host);
                                 const growTime    = ns.getGrowTime(t.host);
-                                // Grow fires first; weaken delayed so both land close together
                                 const weakenDelay = Math.max(0, growTime - weakenTime + LAND_SPACING);
 
                                 if (growAlloc   && growAlloc.length   > 0) launchWorkers(ns, 'grow',   growAlloc,   t.host, 0);
@@ -653,23 +761,22 @@ async function runFullMode(ns) {
             }
         }
 
-        // Write cycle timing to port 1 for status.js — clear first so port never fills
+        // Write cycle timing to port 1 for status.js
         clearPort(ns, PORT_STATUS);
         writePort(ns, PORT_STATUS, { cycleStart: now, targets: targetTiming });
 
         // --- Secondary pass: weaken-only on queued targets using surplus RAM ---
-        // Advances security on non-active unprepped targets without disrupting prep logic
         if (threadsRemaining > 0) {
             for (const t of targets) {
                 if (threadsRemaining <= 0) break;
-                if (t.host === activePrepTarget) continue;                          // Active prep target already handled
-                if (preppedCache[t.host]) continue;                                 // Already prepped
-                if (cycleEnds[t.host] && cycleEnds[t.host] > now) continue;        // Cycle in flight — skip silently
+                if (t.host === activePrepTarget) continue;
+                if (preppedCache[t.host]) continue;
+                if (cycleEnds[t.host] && cycleEnds[t.host] > now) continue;
 
                 const sec             = ns.getServerSecurityLevel(t.host);
                 const minSec          = ns.getServerMinSecurityLevel(t.host);
                 const secDelta        = Math.max(0, sec - minSec);
-                if (secDelta <= 0) continue;                                        // Security already at minimum
+                if (secDelta <= 0) continue;
 
                 const weakenPerThread = ns.weakenAnalyze(1);
                 const fullWeaken      = Math.ceil(secDelta / weakenPerThread);
@@ -691,22 +798,20 @@ async function runFullMode(ns) {
         const preppedTargets = targets.filter(t => preppedCache[t.host]);
 
         if (preppedTargets.length > 0 && threadsRemaining > 0) {
-            // Pre-calculate batch size per target; null = target invalid for overflow
             const targetBatches = preppedTargets.map(t => ({
                 target    : t,
-                batch     : calcBatchThreads(ns, t.host, threadsRemaining),
+                batch     : calcBatchThreads(ns, t.host, threadsRemaining, hasFormulas),
                 weakenTime: ns.getWeakenTime(t.host),
                 hackTime  : ns.getHackTime(t.host),
                 growTime  : ns.getGrowTime(t.host),
-                offset    : batchesLaunched * BATCH_SPACING,                        // Stagger starts after primary batches
+                offset    : batchesLaunched * BATCH_SPACING,
             })).filter(tb => tb.batch !== null);
 
             if (targetBatches.length > 0) {
                 const minBatchSize   = Math.min(...targetBatches.map(tb => tb.batch.totalThreads));
-                const reserveThreads = preppedTargets.length * minBatchSize;        // Hold back one batch per target for next cycle
-                const overflowBudget = Math.max(0, threadsRemaining - reserveThreads);
+                const reserveThreads = preppedTargets.length * minBatchSize;
                 const minWeakenTime  = Math.min(...targetBatches.map(tb => tb.weakenTime));
-                const cycleSlots     = Math.floor(minWeakenTime / BATCH_SPACING);   // Max batches fitting in shortest cycle window
+                const cycleSlots     = Math.floor(minWeakenTime / BATCH_SPACING);
 
                 let totalOverflow = 0;
                 let roundIdx      = 0;
@@ -751,11 +856,10 @@ async function runFullMode(ns) {
                     launchWorkers(ns, 'weaken', weakenGAlloc, tb.target.host, weakenGDelay);
 
                     threadsRemaining -= tb.batch.totalThreads;
-                    tb.offset        += BATCH_SPACING;                              // Advance this target's stagger for next batch
+                    tb.offset        += BATCH_SPACING;
                     totalOverflow++;
                     overflowLog[tb.target.host] = (overflowLog[tb.target.host] || 0) + 1;
 
-                    // Extend cycleEnd to cover last overflow batch landing
                     cycleEnds[tb.target.host] = now + tb.offset + tb.weakenTime + LAND_SPACING * 4;
                 }
 
@@ -767,14 +871,13 @@ async function runFullMode(ns) {
 
         log(ns, 'Batches: ' + batchesLaunched + ' hack | ' + prepLaunched + ' prep | threads used: ' + (totalAvailableThreads - threadsRemaining) + '/' + totalAvailableThreads);
 
-        // Cycle-aware sleep: wake at nearest active cycleEnd
         const pendingEnds = targets
             .map(t => cycleEnds[t.host])
             .filter(e => e !== undefined && e > now);
 
         const sleepTime = pendingEnds.length > 0
             ? Math.min(...pendingEnds) - now
-            : 10000;                                                                // Fallback: no active targets dispatched
+            : 10000;
 
         log(ns, 'Next cycle in ' + formatTime(sleepTime));
         await ns.sleep(Math.max(sleepTime, LOOP_SLEEP));
@@ -787,15 +890,22 @@ async function runFullMode(ns) {
 // =============================================================================
 
 export async function main(ns) {
-    const flags = ns.flags([['help', false]]);
+    const flags = ns.flags([
+        ['help',           false],
+        ['ladder-threads', DEFAULT_LADDER_THREADS],
+    ]);
 
     if (flags.help) {
-        ns.tprint('=== orchestrate.js v1.3.0 ===');
+        ns.tprint('=== orchestrate.js v1.6.0 ===');
         ns.tprint('Purpose: Tier-aware HWGW batch scheduler. Manages grow/weaken/hack');
         ns.tprint('         workers across all rooted servers to maximise income.');
-        ns.tprint('Usage:   run /scripts/orchestrate.js');
+        ns.tprint('         Uses Formulas.exe when present for exact thread calculations.');
+        ns.tprint('         Ladder mode: sticks to a fixed target progression until');
+        ns.tprint('         worker pool exceeds --ladder-threads (default ' + DEFAULT_LADDER_THREADS + ').');
+        ns.tprint('Usage:   run /scripts/orchestrate.js [--ladder-threads N]');
         ns.tprint('Flags:');
-        ns.tprint('  --help   Show this help and exit');
+        ns.tprint('  --help              Show this help and exit');
+        ns.tprint('  --ladder-threads N  Exit ladder mode above N total worker threads (default: ' + DEFAULT_LADDER_THREADS + ')');
         ns.tprint('Ports:');
         ns.tprint('  Writes port 1: cycle timing data for status.js');
         ns.tprint('  Reads  port 2: new root events from auto-root.js (peek only)');
@@ -804,30 +914,28 @@ export async function main(ns) {
 
     ns.disableLog('ALL');
 
-    clearPort(ns, PORT_STATUS);                                                     // Clear stale port 1 data from any previous run
-    ns.atExit(() => clearPort(ns, PORT_STATUS));                                    // Clear port 1 on exit so status.js shows no-data immediately
+    clearPort(ns, PORT_STATUS);
+    ns.atExit(() => clearPort(ns, PORT_STATUS));
 
-    const tier = getRamTier(ns);
+    const tier        = getRamTier(ns);
+    const hasFormulas = ns.fileExists(FORMULAS_EXE, 'home');
+    log(ns, 'Startup: tier=' + tier + ' formulas=' + hasFormulas + ' ladder-threads=' + flags['ladder-threads']);
+
     if (tier === 0) {
         await runTier0(ns);
     } else {
-        // Bootstrap holds ~4GB RAM while launching — auto-root (5.4GB) and buy-servers
-        // can't fit alongside orchestrate (~10GB) + bootstrap on 16GB home.
-        // Wait for bootstrap to exit, then launch companions orchestrate owns.
         await ns.sleep(1000);
         if (!ns.isRunning(AUTOROOT_SCRIPT, 'home')) {
-            const arPid = ns.exec(AUTOROOT_SCRIPT, 'home', 1);                      // Single pass (no --watch): exits after scan, freeing RAM for buy-servers
+            const arPid = ns.exec(AUTOROOT_SCRIPT, 'home', 1);
             if (arPid > 0) log(ns, 'Launched auto-root.js (pid ' + arPid + ')');
             else           log(ns, 'WARNING: auto-root.js launch failed');
         }
-        // auto-root + orchestrate fills 16GB — buy-servers can't start until auto-root exits.
-        // Single-pass auto-root completes in < 5s; 10s wait is safe.
         await ns.sleep(10000);
         if (!ns.isRunning(BUY_SCRIPT, 'home')) {
             const bsPid = ns.exec(BUY_SCRIPT, 'home', 1);
             if (bsPid > 0) log(ns, 'Launched buy-servers.js (pid ' + bsPid + ')');
             else           log(ns, 'WARNING: buy-servers.js launch failed');
         }
-        await runFullMode(ns);
+        await runFullMode(ns, flags['ladder-threads']);
     }
 }

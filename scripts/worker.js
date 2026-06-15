@@ -10,7 +10,7 @@
  *   Designed to be dispatched in bulk by orchestrate.js with controlled
  *   delays so multiple workers land on target in precise sequence.
  *
- *   RAM cost must remain at 1.75GB. Do not add any NS calls beyond the
+ *   RAM cost must remain at 2.0GB. Do not add any NS calls beyond the
  *   single operation. No imports. No lib-utils.
  *
  * Changelog:

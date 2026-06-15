@@ -23,7 +23,11 @@
  *   port 2 each cycle without consuming.
  *
  * Changelog:
- *   v1.4.0 - SCP worker.js to already-rooted servers that are missing it.
+ *   v1.5.0 - Remove relaunchOrchestrate. orchestrate.js discovers new worker
+ *            servers via getWorkerServers() each cycle — no restart needed.
+ *            Restarting was resetting activePrepTarget and hackMode state,
+ *            causing constant target switching and lost PREP progress.
+ *   v1.5.0 - SCP worker.js to already-rooted servers that are missing it.
  *            Fixes pool gap when servers were rooted before v1.3.0 was installed.
  *   v1.3.0 - SCP worker.js to newly rooted servers so orchestrate pool is
  *            ready immediately without waiting for orchestrate's first cycle.
@@ -52,12 +56,10 @@ import {
 } from '/scripts/lib-utils.js';
 
 // --- Constants ---
-const WATCH_INTERVAL     = 5 * 60 * 1000;                                          // 5 minutes between watch cycles
-const KILL_SETTLE_MS     = 500;                                                     // ms to wait after killing orchestrate before relaunch
-const PORT_AUTOROOT      = 2;                                                       // Port this script owns and writes to
-const ORCHESTRATE_SCRIPT = '/scripts/orchestrate.js';                              // Path to orchestrate for relaunch
-const BACKDOOR_SCRIPT    = 'scripts/backdoor.js';                                   // Launched per-host when SF4 available
-const WORKER_SCRIPT      = 'scripts/worker.js';                                     // Copied to newly rooted servers for orchestrate
+const WATCH_INTERVAL = 5 * 60 * 1000;                                              // 5 minutes between watch cycles
+const PORT_AUTOROOT  = 2;                                                           // Port this script owns and writes to
+const BACKDOOR_SCRIPT = 'scripts/backdoor.js';                                     // Launched per-host when SF4 available
+const WORKER_SCRIPT  = 'scripts/worker.js';                                        // Copied to newly rooted servers for orchestrate
 
 // All known port-cracker programs
 const CRACKERS = [
@@ -174,23 +176,6 @@ async function attemptRooting(ns) {
     return newlyRooted;
 }
 
-/**
- * Kills any running orchestrate.js instance and relaunches it.
- * Waits KILL_SETTLE_MS after kill to ensure old process has freed RAM
- * before the new instance starts — prevents double-dispatch on first cycle.
- * @param {NS} ns
- */
-async function relaunchOrchestrate(ns) {
-    ns.scriptKill(ORCHESTRATE_SCRIPT, 'home');                                      // Kill existing orchestrate instance
-    await ns.sleep(KILL_SETTLE_MS);                                                 // Wait for process to fully terminate and free RAM
-    const pid = ns.exec(ORCHESTRATE_SCRIPT, 'home', 1);
-    if (pid === 0) {
-        ns.tprint('[AUTO-ROOT] WARNING: failed to relaunch orchestrate.js');
-    } else {
-        ns.tprint('[AUTO-ROOT] orchestrate.js relaunched (pid ' + pid + ')');
-    }
-}
-
 
 // =============================================================================
 // Entry point
@@ -203,7 +188,7 @@ export async function main(ns) {
     ]);
 
     if (flags.help) {
-        ns.tprint('=== auto-root.js v1.4.0 ===');
+        ns.tprint('=== auto-root.js v1.5.0 ===');
         ns.tprint('Purpose: Gains root access on all reachable servers. Optionally');
         ns.tprint('         monitors for new crackers and backdoors servers via SF4.');
         ns.tprint('Usage:   run /scripts/auto-root.js [--watch]');
@@ -215,7 +200,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== auto-root.js v1.4.0 | watch:' + flags.watch + ' ===');
+    ns.tprint('=== auto-root.js v1.5.0 | watch:' + flags.watch + ' ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -228,8 +213,7 @@ export async function main(ns) {
         const newlyRooted = await attemptRooting(ns);
 
         if (newlyRooted > 0) {
-            ns.tprint('[AUTO-ROOT] ' + newlyRooted + ' new server(s) rooted — relaunching orchestrate.js');
-            await relaunchOrchestrate(ns);
+            ns.tprint('[AUTO-ROOT] ' + newlyRooted + ' new server(s) rooted — orchestrate picks them up next cycle');
         }
 
         if (flags.watch) {
@@ -242,11 +226,10 @@ export async function main(ns) {
 
             if (newCrackers.length > 0) {
                 ns.tprint('[AUTO-ROOT] New cracker(s): ' + newCrackers.join(', ') + ' — re-attempting root');
-                knownCrackers = currentCrackers;                                    // Update snapshot
+                knownCrackers = currentCrackers;
                 const crackerRooted = await attemptRooting(ns);
                 if (crackerRooted > 0) {
-                    ns.tprint('[AUTO-ROOT] ' + crackerRooted + ' new server(s) rooted — relaunching orchestrate.js');
-                    await relaunchOrchestrate(ns);
+                    ns.tprint('[AUTO-ROOT] ' + crackerRooted + ' new server(s) rooted — orchestrate picks them up next cycle');
                 }
             } else {
                 log(ns, 'No new crackers detected');

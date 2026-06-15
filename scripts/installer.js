@@ -43,6 +43,19 @@ const SCRIPTS = [
     'upgrade-servers.js',
     'hacknet-manager.js',
     'status.js',
+    'share.js',
+    'share-manager.js',
+    'contracts.js',
+    'singularity.js',
+    'stocks.js',
+    'gang.js',
+    'dashboard.js',
+    'sleeve.js',
+    'bladeburner.js',
+    'corporation.js',
+    'grafting.js',
+    'go.js',
+    'stanek.js',
     'bootstrap.js',
     'installer.js',
 ];
@@ -70,7 +83,7 @@ export async function main(ns) {
     }
 
     ns.tprint('=== installer.js v1.0.0 ===');
-    ns.tprint('Downloading ' + SCRIPTS.length + ' scripts from GitHub...');  // 13 scripts
+    ns.tprint('Downloading ' + SCRIPTS.length + ' scripts from GitHub...');
     ns.disableLog('ALL');
 
     let successCount = 0;
