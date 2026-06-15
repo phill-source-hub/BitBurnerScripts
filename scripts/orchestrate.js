@@ -1,6 +1,6 @@
 /**
  * orchestrate.js
- * Version: 1.5.0
+ * Version: 1.8.0
  *
  * Tier-aware HWGW batch scheduler and early-game grow/weaken dispatcher.
  *
@@ -44,6 +44,11 @@
  *   Formulas.exe is absent — the static scanner does not see bracket access.
  *
  * Changelog:
+ *   v1.8.0 - Dynamic target count: replace MAX_TARGETS=5 with floor(totalThreads/MIN_THREADS_PER_TARGET).
+ *            At 975 threads → 12 targets; at 200 → 2. Scales automatically as farm grows.
+ *            Cycle log now shows targets: actual/capacity and threads: used/total.
+ *   v1.7.0 - Fix NaN/-1 in calcBatchThreadsFallback; extend port 1 to include all targets;
+ *            add thread counts (H/WH/G/WG) to targetTiming; fix ns.format.number arg.
  *   v1.6.0 - Ladder mode: fixed target progression until --ladder-threads capacity reached.
  *            activePrepTarget now protected from mid-PREP eviction — only switches when
  *            target is prepped, gone, or unhackable (not when new server ranks higher).
@@ -150,7 +155,7 @@ const BATCH_SPACING = 100;                                                      
 
 // --- Allocation constants ---
 const WORKER_RAM            = 2.0;                                                  // GB RAM cost per worker thread
-const MAX_TARGETS           = 5;                                                    // Maximum simultaneous hack targets in tier 1+
+const MIN_THREADS_PER_TARGET = 80;                                                  // Minimum threads budgeted per target; controls dynamic target count
 const LOOP_SLEEP            = 200;                                                  // Minimum ms between scheduler cycles
 const SAFE_WEAKEN_PER_GROW  = 1 / 4;                                               // Fallback weaken ratio when formulas unavailable
 const MIN_STEAL             = 0.01;                                                 // Minimum steal fraction (1%)
@@ -585,8 +590,9 @@ async function runFullMode(ns, ladderThreads) {
         const useLadder = totalWorkerThreads < ladderThreads;
 
         // Build target list: ladder mode keeps active hack targets + one prep target;
-        // dynamic mode uses top-N by score, preserving activePrepTarget if near the cut.
-        const allRanked = getRankedTargets(ns);
+        // dynamic mode scales target count with thread capacity (1 target per MIN_THREADS_PER_TARGET).
+        const allRanked  = getRankedTargets(ns);
+        const maxTargets = useLadder ? null : Math.max(1, Math.floor(totalWorkerThreads / MIN_THREADS_PER_TARGET));
         let targets;
         if (useLadder) {
             const ladderHost  = getLadderTarget(ns);
@@ -600,7 +606,7 @@ async function runFullMode(ns, ladderThreads) {
             }
             log(ns, '[LADDER] threads=' + totalWorkerThreads + '/' + ladderThreads + ' target=' + (ladderHost || 'none'));
         } else {
-            targets = allRanked.slice(0, MAX_TARGETS);
+            targets = allRanked.slice(0, maxTargets);
             // Keep activePrepTarget in list even if a newly-rooted server pushed it outside top-N
             if (activePrepTarget && !targets.find(t => t.host === activePrepTarget)) {
                 const preserved = allRanked.find(t => t.host === activePrepTarget);
@@ -645,7 +651,7 @@ async function runFullMode(ns, ladderThreads) {
             log(ns, 'New root detected: ' + rootEvent.host + ' — SCP will cover next cycle');
         }
 
-        log(ns, '--- cycle | threads: ' + totalAvailableThreads + ' | targets: ' + targets.length + ' | formulas: ' + hasFormulas + ' ---');
+        log(ns, '--- cycle | threads: ' + totalAvailableThreads + '/' + totalWorkerThreads + ' | targets: ' + targets.length + (maxTargets ? '/' + maxTargets : '') + ' | formulas: ' + hasFormulas + ' ---');
 
         // --- Phase 1 Pass 1: HACK batches for all prepped targets ---
         for (const t of targets) {
