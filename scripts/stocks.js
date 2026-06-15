@@ -38,6 +38,10 @@
  *   - Live bid re-check immediately before signal sells
  *
  * Changelog:
+ *   v1.9.8 - Cycle-spike guard: skip sell when forecast drops >0.10 in one tick
+ *            (market cycle fires; getBidPrice is stale pre-crash while getForecast
+ *            is already updated — sellStock uses actual price → guaranteed loss).
+ *            Add take-profit at +20% of position cost regardless of forecast.
  *   v1.9.7 - Track ownedByUs set: only signal-sell positions bought this session.
  *            Auto-flush legacy positions at startup (unknown entry count = wrong
  *            commission math = false-positive profitOk = sell at loss).
@@ -72,7 +76,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.7';
+const VERSION     = '1.9.8';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
@@ -80,6 +84,14 @@ const BUY_THRESHOLD  = 0.55;  // forecast above this → buy signal
 const SELL_THRESHOLD = 0.55;  // forecast below this → sell signal (symmetric: exit when edge gone)
 // STOPLOSS removed — SELL_THRESHOLD=0.55 exits when edge gone; forecast-only stop-loss
 // caused unconditional sells when market cycle flipped forecast 0.69→0.31 in one tick
+
+// Take-profit: sell if net profit exceeds this fraction of position cost, regardless of forecast
+const TAKE_PROFIT_PCT = 0.20;   // +20% of position cost → take the win
+
+// Forecast drop threshold for detecting a market cycle tick.
+// When a stock's forecast drops >this much in one tick, getBidPrice is stale (pre-crash)
+// while getForecast is already updated. Skip the sell; bid catches up next tick.
+const CYCLE_SPIKE_THRESHOLD = 0.10;
 
 // Estimated forecast parameters (pre-4S)
 const EST_WINDOW   = 50;  // rolling window of up/down ticks
@@ -159,10 +171,11 @@ export async function main(ns) {
         return;
     }
 
-    const lastPrice  = {};   // sym → last seen price (for detecting tick direction)
-    const upHistory  = {};   // sym → boolean[] ring buffer (true = up tick)
-    const cooldown   = {};   // sym → ticks remaining before re-buy allowed
-    const ownedByUs  = new Set(); // symbols bought this session (single-entry, 2 commissions)
+    const lastPrice    = {};   // sym → last seen price (for detecting tick direction)
+    const upHistory    = {};   // sym → boolean[] ring buffer (true = up tick)
+    const cooldown     = {};   // sym → ticks remaining before re-buy allowed
+    const ownedByUs    = new Set(); // symbols bought this session (single-entry, 2 commissions)
+    const lastForecast = {};   // sym → forecast from previous tick (for cycle-spike detection)
 
     const MONEY_FLOOR = flags.floor;
     const INTERVAL    = flags.interval * 1000;
@@ -172,7 +185,7 @@ export async function main(ns) {
     ns.atExit(() => ns.clearPort(PORT_STOCKS));
 
     do {
-        tick(ns, lastPrice, upHistory, cooldown, ownedByUs, MONEY_FLOOR, stats);
+        tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, MONEY_FLOOR, stats);
         if (!flags.once) await ns.sleep(INTERVAL);
     } while (!flags.once);
 }
@@ -182,7 +195,7 @@ export async function main(ns) {
 // Tick
 // =============================================================================
 
-function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, moneyFloor, stats) {
+function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, moneyFloor, stats) {
     const hasWSE = ns.stock.hasWseAccount();
     const hasTIX = ns.stock.hasTixApiAccess();
     const has4S  = hasTIX && ns.stock.has4SDataTixApi();
@@ -274,23 +287,37 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, moneyFloor, stats) 
             openPositions++;
         }
 
+        // Update lastForecast regardless of whether we hold this symbol
+        const prevForecast    = lastForecast[sym];
+        lastForecast[sym]     = forecast;
+        const forecastDrop    = prevForecast !== undefined ? prevForecast - forecast : 0;
+        const cycleSpiked     = forecastDrop > CYCLE_SPIKE_THRESHOLD;
+
         if (currentShares <= 0 || !ownedByUs.has(sym)) continue;
 
-        const profitIfSold = (bid - currentAvgPx) * currentShares - 2 * COMMISSION;
-        const profitOk     = profitIfSold > MIN_PROFIT;
+        const profitIfSold  = (bid - currentAvgPx) * currentShares - 2 * COMMISSION;
+        const profitOk      = profitIfSold > MIN_PROFIT;
+        const positionCost  = currentAvgPx * currentShares;
+        const takeProfit    = profitIfSold > positionCost * TAKE_PROFIT_PCT;
 
         // Price stop-loss: emergency exit if bid drops >PRICE_STOPLOSS_PCT below avgPx.
-        // No forecast stop-loss — with SELL_THRESHOLD=0.55 we already exit when edge is
-        // gone. Forecast can flip 0.69→0.31 in one market cycle tick while price barely
-        // moves; a forecast-based stop-loss would unconditionally sell a profitable position.
         const priceStopLoss = currentAvgPx > 0 && bid <= currentAvgPx * (1 - PRICE_STOPLOSS_PCT);
 
-        const shouldSell = (signal === 'sell' && profitOk) || priceStopLoss;
+        const shouldSell = ((signal === 'sell' && profitOk) || takeProfit) || priceStopLoss;
 
         if (!shouldSell) continue;
 
-        // Re-read bid immediately before executing to guard against a market tick
-        // firing between the check and sellStock. Price stop-loss executes unconditionally.
+        // If forecast just dropped sharply this tick (market cycle signature), getBidPrice
+        // is stale — it returns the pre-crash price while getForecast is already updated.
+        // sellStock uses the actual post-crash price, so we'd sell at a loss.
+        // Skip this tick; bid catches up on the next tick and profitOk will gate correctly.
+        if (cycleSpiked && !priceStopLoss) {
+            ns.print('[STOCKS] SKIP ' + sym + ' (cycle spike Δf=' + forecastDrop.toFixed(2) + ') — waiting for bid update');
+            continue;
+        }
+
+        // Re-read bid immediately before executing (reduce race window for non-spike sells).
+        // Price stop-loss executes unconditionally.
         if (!priceStopLoss) {
             const liveBid          = ns.stock.getBidPrice(sym);
             const liveProfitIfSold = (liveBid - currentAvgPx) * currentShares - 2 * COMMISSION;
@@ -309,6 +336,8 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, moneyFloor, stats) 
 
             const reason = priceStopLoss
                 ? 'STOPLOSS -' + (PRICE_STOPLOSS_PCT * 100).toFixed(0) + '%'
+                : takeProfit
+                ? 'TAKEPROFIT +' + (TAKE_PROFIT_PCT * 100).toFixed(0) + '%'
                 : 'signal f=' + forecast.toFixed(2);
 
             ns.print('[STOCKS] SELL ' + sym + ' (' + reason + ')' +
@@ -363,9 +392,12 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, moneyFloor, stats) 
         // Per-position debug on no-trade cycles
         for (const d of symData) {
             if (d.longShares <= 0) continue;
-            const profitIfSold = (d.bid - d.longAvgPx) * d.longShares - 2 * COMMISSION;
+            const [cs, cAvg,,] = ns.stock.getPosition(d.sym);
+            const profitIfSold = (d.bid - cAvg) * cs - 2 * COMMISSION;
+            const prev = lastForecast[d.sym];
+            const drop = prev !== undefined ? prev - d.forecast : 0;
             ns.print('  ' + d.sym
-                + ' f=' + d.forecast.toFixed(2)
+                + ' f=' + d.forecast.toFixed(2) + (drop > 0.05 ? '(Δ-' + drop.toFixed(2) + ')' : '')
                 + ' sig:' + d.signal
                 + ' profit:' + (profitIfSold >= 0 ? '+' : '') + ns.format.number(profitIfSold));
         }
