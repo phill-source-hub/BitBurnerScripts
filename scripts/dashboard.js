@@ -25,8 +25,12 @@
  *     Bladeburner — rank, current action (if BB API available)
  *
  * Changelog:
- *   v1.2.0 - Fix ns.format.number calls — API takes (n, fractionalDigits) not
- *            a numeral.js format string. Wrong arg caused React render crash.
+ *   v1.3.0 - Replace ns.format.number in render functions with pure-JS fmtNum.
+ *            NS calls from React render/setInterval context cause uncaught exceptions
+ *            displayed as "Error in custom react content". gatherData now wrapped
+ *            in try/catch returning previous state on failure. getTotalScriptIncome
+ *            individually guarded.
+ *   v1.2.0 - Fix ns.format.number arg type (was numeral.js format string, not number).
  *   v1.1.0 - Compact non-running scripts. Add corp + bladeburner sections.
  *            Add grafting, go, stanek to MANAGED list.
  *   v1.0.0 - Initial version.
@@ -45,7 +49,7 @@
  * RAM: ~4.5 GB
  */
 
-const VERSION    = '1.2.0';
+const VERSION    = '1.3.0';
 const POLL_MS    = 2000;
 const STALE_MS   = 2 * 60 * 1000;
 const TIER_MIN   = 2;
@@ -92,71 +96,93 @@ const e = React.createElement;
 
 
 // =============================================================================
+// Pure-JS number formatter — keeps NS calls out of React render phase
+// =============================================================================
+
+function fmtNum(n, decimals) {
+    if (decimals === undefined) decimals = 2;
+    if (n === undefined || n === null || isNaN(n)) return '0';
+    const abs = Math.abs(n);
+    const suffixes = ['', 'k', 'm', 'b', 't', 'q'];
+    let i = 0;
+    let v = n;
+    while (Math.abs(v) >= 1000 && i < suffixes.length - 1) { v /= 1000; i++; }
+    return v.toFixed(decimals) + suffixes[i];
+}
+
+
+// =============================================================================
 // Data polling
 // =============================================================================
 
-function gatherData(ns) {
-    const player   = ns.getPlayer();
-    const homeMax  = ns.getServerMaxRam('home');
-    const homeUsed = ns.getServerUsedRam('home');
-
-    const homeProcs = ns.ps('home');
-    const running   = new Set(homeProcs.map(function(p) {
-        return p.filename.replace(/^\//, '');
-    }));
-
-    let sharePow = 1;
-    try { sharePow = ns.getSharePower(); } catch (_) {}
-
-    const p1Raw    = ns.peek(1);
-    const hwgwData = (p1Raw === 'NULL PORT DATA') ? null : safeParse(p1Raw);
-
-    const p3Raw       = ns.peek(3);
-    const hacknetData = (p3Raw === 'NULL PORT DATA') ? null : safeParse(p3Raw);
-
-    let farmMax = 0, farmUsed = 0, farmCount = 0, farmLimit = 0;
+function gatherData(ns, prev) {
     try {
-        const names = ns.cloud.getServerNames();
-        farmLimit   = ns.cloud.getServerLimit();
-        farmCount   = names.length;
-        for (var i = 0; i < names.length; i++) {
-            farmMax  += ns.getServerMaxRam(names[i]);
-            farmUsed += ns.getServerUsedRam(names[i]);
-        }
-    } catch (_) {}
+        const player   = ns.getPlayer();
+        const homeMax  = ns.getServerMaxRam('home');
+        const homeUsed = ns.getServerUsedRam('home');
 
-    const targets    = (hwgwData && hwgwData.targets) ? hwgwData.targets : {};
-    const cycleStart = (hwgwData && hwgwData.cycleStart) ? hwgwData.cycleStart : 0;
-    const stale      = (Date.now() - cycleStart) > STALE_MS;
+        const homeProcs = ns.ps('home');
+        const running   = new Set(homeProcs.map(function(p) {
+            return p.filename.replace(/^\//, '');
+        }));
 
-    // Corporation stats (bracket notation — no static RAM cost)
-    let corpData = null;
-    try {
-        const corp = ns['corporation'];
-        if (corp['hasCorporation']()) {
-            const cd = corp['getCorporation']();
-            corpData = { funds: cd.funds, revenue: cd.revenue, divs: cd.divisions.length };
-        }
-    } catch (_) {}
+        let sharePow = 1;
+        try { sharePow = ns.getSharePower(); } catch (_) {}
 
-    // Bladeburner stats (bracket notation)
-    let bbData = null;
-    try {
-        const bb = ns['bladeburner'];
-        if (bb['inBladeburner']()) {
-            const action = bb['getCurrentAction']();
-            bbData = { rank: bb['getRank'](), action: action ? action.name : 'idle', sp: bb['getSkillPoints']() };
-        }
-    } catch (_) {}
+        const p1Raw    = ns.peek(1);
+        const hwgwData = (p1Raw === 'NULL PORT DATA') ? null : safeParse(p1Raw);
 
-    return {
-        player, homeMax, homeUsed, running,
-        sharePow, hwgwData, hacknetData, stale,
-        farmMax, farmUsed, farmCount, farmLimit,
-        targets, cycleStart, corpData, bbData,
-        now: Date.now(),
-        income: ns.getTotalScriptIncome(),
-    };
+        const p3Raw       = ns.peek(3);
+        const hacknetData = (p3Raw === 'NULL PORT DATA') ? null : safeParse(p3Raw);
+
+        let farmMax = 0, farmUsed = 0, farmCount = 0, farmLimit = 0;
+        try {
+            const names = ns.cloud.getServerNames();
+            farmLimit   = ns.cloud.getServerLimit();
+            farmCount   = names.length;
+            for (var i = 0; i < names.length; i++) {
+                farmMax  += ns.getServerMaxRam(names[i]);
+                farmUsed += ns.getServerUsedRam(names[i]);
+            }
+        } catch (_) {}
+
+        const targets    = (hwgwData && hwgwData.targets) ? hwgwData.targets : {};
+        const cycleStart = (hwgwData && hwgwData.cycleStart) ? hwgwData.cycleStart : 0;
+        const stale      = (Date.now() - cycleStart) > STALE_MS;
+
+        let corpData = null;
+        try {
+            const corp = ns['corporation'];
+            if (corp['hasCorporation']()) {
+                const cd = corp['getCorporation']();
+                corpData = { funds: cd.funds, revenue: cd.revenue, divs: cd.divisions.length };
+            }
+        } catch (_) {}
+
+        let bbData = null;
+        try {
+            const bb = ns['bladeburner'];
+            if (bb['inBladeburner']()) {
+                const action = bb['getCurrentAction']();
+                bbData = { rank: bb['getRank'](), action: action ? action.name : 'idle', sp: bb['getSkillPoints']() };
+            }
+        } catch (_) {}
+
+        let income = [0, 0];
+        try { income = ns.getTotalScriptIncome(); } catch (_) {}
+
+        return {
+            player, homeMax, homeUsed, running,
+            sharePow, hwgwData, hacknetData, stale,
+            farmMax, farmUsed, farmCount, farmLimit,
+            targets, cycleStart, corpData, bbData,
+            now: Date.now(),
+            income,
+        };
+    } catch (_) {
+        // Return previous state on any unexpected NS failure so the UI keeps rendering
+        return prev || null;
+    }
 }
 
 function safeParse(raw) {
@@ -184,7 +210,11 @@ function Dashboard(props) {
     var setD     = stateArr[1];
 
     React.useEffect(function() {
-        function poll() { setD(gatherData(ns)); }
+        var current = d;
+        function poll() {
+            var next = gatherData(ns, current);
+            if (next) { current = next; setD(next); }
+        }
         poll();
         var id = window.setInterval(poll, POLL_MS);
         return function() { window.clearInterval(id); };
@@ -237,8 +267,8 @@ function renderHeader(d, ns) {
         e('div', { key: 'stats', style: { display: 'flex', gap: '16px', flexWrap: 'wrap' } }, [
             statChip('tier', 'T' + tier,                          C.cyan),
             statChip('hack', d.player.skills.hacking,             C.blue),
-            statChip('$',    ns.format.number(money,  2),   C.green),
-            statChip('/s',   ns.format.number(income, 2),   C.green),
+            statChip('$',    fmtNum(money,  2),   C.green),
+            statChip('/s',   fmtNum(income, 2),   C.green),
         ]),
     ]);
 }
@@ -409,13 +439,13 @@ function renderHacknet(d, ns) {
     } else if (hn.isServerMode) {
         content = e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
             statChip('servers', hn.nodes,                                                          C.yellow),
-            statChip('H/s',     ns.format.number(hn.totalIncome, 1),                         C.yellow),
+            statChip('H/s',     fmtNum(hn.totalIncome, 1),                         C.yellow),
             statChip('hashes',  hn.hashes.toFixed(0) + '/' + hn.hashCapacity.toFixed(0),          C.purple),
         ]);
     } else {
         content = e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px' } }, [
             statChip('nodes', hn.nodes,                                  C.yellow),
-            statChip('$/s',   ns.format.number(hn.totalIncome, 2), C.yellow),
+            statChip('$/s',   fmtNum(hn.totalIncome, 2), C.yellow),
         ]);
     }
 
@@ -452,8 +482,8 @@ function renderCorp(d, ns) {
     return e('div', { key: 'corp', style: panel() }, [
         sectionHead('CORPORATION'),
         e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
-            statChip('funds',  '$' + ns.format.number(cd.funds,   2), C.green),
-            statChip('rev/s',  '$' + ns.format.number(cd.revenue, 2), C.green),
+            statChip('funds',  '$' + fmtNum(cd.funds,   2), C.green),
+            statChip('rev/s',  '$' + fmtNum(cd.revenue, 2), C.green),
             statChip('divs',   cd.divs,                                      C.cyan),
         ]),
     ]);
