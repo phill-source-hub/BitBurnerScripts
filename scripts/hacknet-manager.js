@@ -23,13 +23,13 @@
  *   Runs indefinitely — does not self-exit.
  *
  * Changelog:
- *   v1.2.0 - Add --no-buy flag: write stats to port 3 without purchasing anything.
+ *   v1.2.0 - Add --nobuy flag: write stats to port 3 without purchasing anything.
  *   v1.1.0 - Add SF9 Hacknet Server support: cache upgrades + hash spending.
  *   v1.0.0 - Initial version
  *
  * Flags:
  *   --help        Show version, usage, and flags then exit
- *   --no-buy      Stats-only mode: skip all purchases and upgrades (default: false)
+ *   --nobuy      Stats-only mode: skip all purchases and upgrades (default: false)
  *   --reserve N   Additional minimum balance to retain beyond 10% floor (default: 0)
  *   --hash-target S  Server to target with 'Reduce Min Security'/'Increase Max Money'
  *                    (default: 'n00dles' — cheapest to reduce, helps any HWGW target)
@@ -107,7 +107,7 @@ function canAfford(ns, cost, reserve = 0) {
 export async function main(ns) {
     const flags = ns.flags([
         ['help',         false],
-        ['no-buy',       false],
+        ['nobuy',        false],
         ['reserve',      0],
         ['hash-target',  'n00dles'],
     ]);
@@ -116,10 +116,10 @@ export async function main(ns) {
         ns.tprint('=== hacknet-manager.js v1.2.0 ===');
         ns.tprint('Purpose: Purchases and upgrades hacknet nodes/servers. SF9: also manages hashes.');
         ns.tprint('         Runs continuously — does not self-exit.');
-        ns.tprint('Usage:   run /scripts/hacknet-manager.js [--no-buy] [--reserve N] [--hash-target S]');
+        ns.tprint('Usage:   run /scripts/hacknet-manager.js [--nobuy] [--reserve N] [--hash-target S]');
         ns.tprint('Flags:');
         ns.tprint('  --help           Show this help and exit');
-        ns.tprint('  --no-buy         Stats-only mode: write port 3 data, skip all purchases');
+        ns.tprint('  --nobuy         Stats-only mode: write port 3 data, skip all purchases');
         ns.tprint('  --reserve N      Keep at least N additional dollars beyond 10% floor (default: 0)');
         ns.tprint('  --hash-target S  Target server for Reduce Min Security / Increase Max Money (default: n00dles)');
         ns.tprint('Ports:');
@@ -129,7 +129,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== hacknet-manager.js v1.2.0 | reserve:$' + flags.reserve + (flags['no-buy'] ? ' | NO-BUY' : '') + ' ===');
+    ns.tprint('=== hacknet-manager.js v1.2.0 | reserve:$' + flags.reserve + (flags['nobuy'] ? ' | NO-BUY' : '') + ' ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -169,7 +169,7 @@ export async function main(ns) {
 
         const nodeCount = ns.hacknet.numNodes();
 
-        if (!flags['no-buy']) {
+        if (!flags['nobuy']) {
             // --- Priority 1: Buy a new node/server if we can afford it ---
             const newNodeCost = ns.hacknet.getPurchaseNodeCost();
             if (canAfford(ns, newNodeCost, reserve)) {
