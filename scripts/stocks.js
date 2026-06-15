@@ -65,7 +65,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.4';
+const VERSION     = '1.9.5';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
@@ -265,7 +265,7 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
         if (!forecastStopLoss && !priceStopLoss) {
             const liveBid          = ns.stock.getBidPrice(sym);
             const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
-            if (liveProfitIfSold <= MIN_PROFIT) continue;
+            if (liveProfitIfSold <= 0) continue;
         }
 
         const proceeds = ns.stock.sellStock(sym, longShares);
