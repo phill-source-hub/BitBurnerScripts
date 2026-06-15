@@ -40,12 +40,12 @@
  * Dependencies:
  *   None. Standalone — no imports.
  *
- * RAM: ~2.5 GB
- *   Base 1.6 + getPlayer (negligible) + stock functions (no static cost
- *   since all access-gated calls use bracket notation)
+ * RAM: ~7 GB
+ *   Base 1.6 + getSymbols 2.0 + getPrice/Ask/Bid/Position/MaxShares/Forecast ~0.25 each
+ *   + buyStock/sellStock ~0.5 each + access checks ~0.15
  */
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 // 4S trading thresholds
 const BUY_THRESHOLD  = 0.55;                                                        // Forecast > this → buy long
@@ -88,12 +88,10 @@ export async function main(ns) {
 // =============================================================================
 
 function tick(ns, priceHistory, moneyFloor) {
-    const stock = ns['stock'];                                                      // Bracket notation — no static RAM cost
-
-    // --- Access detection ---
-    const hasWSE    = stock['hasWseAccount']();
-    const hasTIX    = stock['hasTixApiAccess']();
-    const has4S     = hasTIX && stock['has4SDataTixApi']();
+    // --- Access detection (direct calls so static scanner allocates RAM) ---
+    const hasWSE = ns.stock.hasWseAccount();
+    const hasTIX = ns.stock.hasTixApiAccess();
+    const has4S  = hasTIX && ns.stock.has4SDataTixApi();
 
     if (!hasWSE) {
         ns.print('[STOCKS] No WSE account. Purchase at World Stock Exchange for ~$200M.');
@@ -105,18 +103,18 @@ function tick(ns, priceHistory, moneyFloor) {
         return;
     }
 
-    const symbols   = stock['getSymbols']();
+    const symbols   = ns.stock.getSymbols();
     const player    = ns.getPlayer();
-    const cashAvail = player.money * (1 - moneyFloor);                             // Cash we can deploy
+    const cashAvail = player.money * (1 - moneyFloor);
 
     let bought = 0, sold = 0, totalGain = 0;
 
     for (const sym of symbols) {
-        const price     = stock['getPrice'](sym);
-        const ask       = stock['getAskPrice'](sym);
-        const bid       = stock['getBidPrice'](sym);
-        const [longShares, longAvgPx, , ] = stock['getPosition'](sym);
-        const maxShares = stock['getMaxShares'](sym);
+        const price     = ns.stock.getPrice(sym);
+        const ask       = ns.stock.getAskPrice(sym);
+        const bid       = ns.stock.getBidPrice(sym);
+        const [longShares, longAvgPx, , ] = ns.stock.getPosition(sym);
+        const maxShares = ns.stock.getMaxShares(sym);
 
         // Update price history
         if (!priceHistory[sym]) priceHistory[sym] = [];
@@ -124,12 +122,12 @@ function tick(ns, priceHistory, moneyFloor) {
         if (priceHistory[sym].length > TREND_WINDOW) priceHistory[sym].shift();
 
         const signal = has4S
-            ? get4SSignal(stock, sym)
+            ? get4SSignal(ns, sym)
             : getTrendSignal(priceHistory[sym]);
 
         // --- Sell existing long position ---
         if (longShares > 0 && signal === 'sell') {
-            const gain = stock['sellStock'](sym, longShares);
+            const gain = ns.stock.sellStock(sym, longShares);
             if (gain > 0) {
                 totalGain += gain - longShares * longAvgPx - COMMISSION;
                 sold++;
@@ -139,7 +137,6 @@ function tick(ns, priceHistory, moneyFloor) {
 
         // --- Buy long position ---
         if (signal === 'buy') {
-            // Already have maximum position
             if (longShares >= maxShares) continue;
 
             const remainingShares = maxShares - longShares;
@@ -149,9 +146,9 @@ function tick(ns, priceHistory, moneyFloor) {
             if (sharesToBuy <= 0) continue;
 
             const positionValue = sharesToBuy * ask;
-            if (positionValue < MIN_POSITION_VALUE) continue;                      // Too small — commission would dominate
+            if (positionValue < MIN_POSITION_VALUE) continue;
 
-            const cost = stock['buyStock'](sym, sharesToBuy);
+            const cost = ns.stock.buyStock(sym, sharesToBuy);
             if (cost > 0) {
                 bought++;
                 ns.print('[STOCKS] BUY  ' + sym + ' | shares:' + sharesToBuy + ' | cost:$' + ns.format.number(cost) + ' | ' + (has4S ? 'forecast' : 'trend'));
@@ -175,8 +172,8 @@ function tick(ns, priceHistory, moneyFloor) {
  * 4S signal: buy when forecast > BUY_THRESHOLD, sell when < SELL_THRESHOLD.
  * @returns {'buy'|'sell'|'hold'}
  */
-function get4SSignal(stock, sym) {
-    const forecast = stock['getForecast'](sym);
+function get4SSignal(ns, sym) {
+    const forecast = ns.stock.getForecast(sym);
     if (forecast > BUY_THRESHOLD)  return 'buy';
     if (forecast < SELL_THRESHOLD) return 'sell';
     return 'hold';
