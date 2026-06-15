@@ -38,6 +38,9 @@
  *   - Live bid re-check immediately before signal sells
  *
  * Changelog:
+ *   v1.9.7 - Track ownedByUs set: only signal-sell positions bought this session.
+ *            Auto-flush legacy positions at startup (unknown entry count = wrong
+ *            commission math = false-positive profitOk = sell at loss).
  *   v1.9.6 - Remove forecast stop-loss. Market cycle flips forecast 0.69→0.31 in
  *            one tick while price barely moves — unconditional sell wiped profitable
  *            positions. Price-based stop-loss (-15%) retained as safety backstop.
@@ -69,7 +72,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.6';
+const VERSION     = '1.9.7';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
@@ -156,9 +159,10 @@ export async function main(ns) {
         return;
     }
 
-    const lastPrice = {};   // sym → last seen price (for detecting tick direction)
-    const upHistory = {};   // sym → boolean[] ring buffer (true = up tick)
-    const cooldown  = {};   // sym → ticks remaining before re-buy allowed
+    const lastPrice  = {};   // sym → last seen price (for detecting tick direction)
+    const upHistory  = {};   // sym → boolean[] ring buffer (true = up tick)
+    const cooldown   = {};   // sym → ticks remaining before re-buy allowed
+    const ownedByUs  = new Set(); // symbols bought this session (single-entry, 2 commissions)
 
     const MONEY_FLOOR = flags.floor;
     const INTERVAL    = flags.interval * 1000;
@@ -168,7 +172,7 @@ export async function main(ns) {
     ns.atExit(() => ns.clearPort(PORT_STOCKS));
 
     do {
-        tick(ns, lastPrice, upHistory, cooldown, MONEY_FLOOR, stats);
+        tick(ns, lastPrice, upHistory, cooldown, ownedByUs, MONEY_FLOOR, stats);
         if (!flags.once) await ns.sleep(INTERVAL);
     } while (!flags.once);
 }
@@ -178,7 +182,7 @@ export async function main(ns) {
 // Tick
 // =============================================================================
 
-function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
+function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, moneyFloor, stats) {
     const hasWSE = ns.stock.hasWseAccount();
     const hasTIX = ns.stock.hasTixApiAccess();
     const has4S  = hasTIX && ns.stock.has4SDataTixApi();
@@ -235,6 +239,23 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
         return { sym, ask, bid, longShares, longAvgPx, maxShares, forecast, signal };
     });
 
+    // Flush any positions that existed before this session started.
+    // Legacy positions may have multiple entry commissions not in our profitIfSold formula,
+    // causing false-positive profitOk and sell-at-a-loss. Sell them once at startup.
+    for (const d of symData) {
+        if (d.longShares <= 0) continue;
+        if (ownedByUs.has(d.sym)) continue; // bought this session — safe
+        // Legacy position: sell unconditionally and log the real P&L
+        const proceeds = ns.stock.sellStock(d.sym, d.longShares);
+        if (proceeds > 0) {
+            const profit = proceeds - d.longShares * d.longAvgPx - COMMISSION;
+            stats.realised += profit;
+            stats.sells++;
+            ns.print('[STOCKS] SELL ' + d.sym + ' (LEGACY FLUSH)' +
+                ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit));
+        }
+    }
+
     const mode = '4S';
     let cashLeft   = player.money * (1 - moneyFloor);
     const tradeCap = player.money * TRADE_CAP_FRAC;
@@ -245,21 +266,24 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
     for (const d of symData) {
         const { sym, bid, longShares, longAvgPx, forecast, signal } = d;
 
-        if (longShares > 0) {
-            unrealised += (bid - longAvgPx) * longShares - 2 * COMMISSION;
+        // Re-read position after potential legacy flush
+        const [currentShares, currentAvgPx,,] = ns.stock.getPosition(sym);
+
+        if (currentShares > 0) {
+            unrealised += (bid - currentAvgPx) * currentShares - 2 * COMMISSION;
             openPositions++;
         }
 
-        if (longShares <= 0) continue;
+        if (currentShares <= 0 || !ownedByUs.has(sym)) continue;
 
-        const profitIfSold = (bid - longAvgPx) * longShares - 2 * COMMISSION;
+        const profitIfSold = (bid - currentAvgPx) * currentShares - 2 * COMMISSION;
         const profitOk     = profitIfSold > MIN_PROFIT;
 
         // Price stop-loss: emergency exit if bid drops >PRICE_STOPLOSS_PCT below avgPx.
         // No forecast stop-loss — with SELL_THRESHOLD=0.55 we already exit when edge is
         // gone. Forecast can flip 0.69→0.31 in one market cycle tick while price barely
         // moves; a forecast-based stop-loss would unconditionally sell a profitable position.
-        const priceStopLoss = longAvgPx > 0 && bid <= longAvgPx * (1 - PRICE_STOPLOSS_PCT);
+        const priceStopLoss = currentAvgPx > 0 && bid <= currentAvgPx * (1 - PRICE_STOPLOSS_PCT);
 
         const shouldSell = (signal === 'sell' && profitOk) || priceStopLoss;
 
@@ -269,18 +293,19 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
         // firing between the check and sellStock. Price stop-loss executes unconditionally.
         if (!priceStopLoss) {
             const liveBid          = ns.stock.getBidPrice(sym);
-            const liveProfitIfSold = (liveBid - longAvgPx) * longShares - 2 * COMMISSION;
+            const liveProfitIfSold = (liveBid - currentAvgPx) * currentShares - 2 * COMMISSION;
             if (liveProfitIfSold <= 0) continue;
         }
 
-        const proceeds = ns.stock.sellStock(sym, longShares);
+        const proceeds = ns.stock.sellStock(sym, currentShares);
         if (proceeds > 0) {
-            const profit = proceeds - longShares * longAvgPx - COMMISSION;
+            const profit = proceeds - currentShares * currentAvgPx - COMMISSION;
             stats.realised += profit;
             stats.sells++;
             cycleSells++;
             cashLeft += proceeds;
             cooldown[sym] = CHURN_COOLDOWN;
+            ownedByUs.delete(sym);
 
             const reason = priceStopLoss
                 ? 'STOPLOSS -' + (PRICE_STOPLOSS_PCT * 100).toFixed(0) + '%'
@@ -320,6 +345,7 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
                 cashLeft -= cost;
                 stats.buys++;
                 cycleBuys++;
+                ownedByUs.add(sym);
                 ns.print('[STOCKS] BUY  ' + sym + ' | shares:' + sharesToBuy +
                     ' | cost:' + ns.format.number(cost) +
                     ' | f=' + forecast.toFixed(2));
