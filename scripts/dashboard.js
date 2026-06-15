@@ -25,6 +25,8 @@
  *     Bladeburner — rank, current action (if BB API available)
  *
  * Changelog:
+ *   v1.2.0 - Fix ns.format.number calls — API takes (n, fractionalDigits) not
+ *            a numeral.js format string. Wrong arg caused React render crash.
  *   v1.1.0 - Compact non-running scripts. Add corp + bladeburner sections.
  *            Add grafting, go, stanek to MANAGED list.
  *   v1.0.0 - Initial version.
@@ -43,7 +45,7 @@
  * RAM: ~4.5 GB
  */
 
-const VERSION    = '1.1.0';
+const VERSION    = '1.2.0';
 const POLL_MS    = 2000;
 const STALE_MS   = 2 * 60 * 1000;
 const TIER_MIN   = 2;
@@ -235,8 +237,8 @@ function renderHeader(d, ns) {
         e('div', { key: 'stats', style: { display: 'flex', gap: '16px', flexWrap: 'wrap' } }, [
             statChip('tier', 'T' + tier,                          C.cyan),
             statChip('hack', d.player.skills.hacking,             C.blue),
-            statChip('$',    ns.format.number(money,  '0.00a'),   C.green),
-            statChip('/s',   ns.format.number(income, '0.00a'),   C.green),
+            statChip('$',    ns.format.number(money,  2),   C.green),
+            statChip('/s',   ns.format.number(income, 2),   C.green),
         ]),
     ]);
 }
@@ -407,13 +409,13 @@ function renderHacknet(d, ns) {
     } else if (hn.isServerMode) {
         content = e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
             statChip('servers', hn.nodes,                                                          C.yellow),
-            statChip('H/s',     ns.format.number(hn.totalIncome, '0.0a'),                         C.yellow),
+            statChip('H/s',     ns.format.number(hn.totalIncome, 1),                         C.yellow),
             statChip('hashes',  hn.hashes.toFixed(0) + '/' + hn.hashCapacity.toFixed(0),          C.purple),
         ]);
     } else {
         content = e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px' } }, [
             statChip('nodes', hn.nodes,                                  C.yellow),
-            statChip('$/s',   ns.format.number(hn.totalIncome, '0.00a'), C.yellow),
+            statChip('$/s',   ns.format.number(hn.totalIncome, 2), C.yellow),
         ]);
     }
 
@@ -450,8 +452,8 @@ function renderCorp(d, ns) {
     return e('div', { key: 'corp', style: panel() }, [
         sectionHead('CORPORATION'),
         e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
-            statChip('funds',  '$' + ns.format.number(cd.funds,   '0.00a'), C.green),
-            statChip('rev/s',  '$' + ns.format.number(cd.revenue, '0.00a'), C.green),
+            statChip('funds',  '$' + ns.format.number(cd.funds,   2), C.green),
+            statChip('rev/s',  '$' + ns.format.number(cd.revenue, 2), C.green),
             statChip('divs',   cd.divs,                                      C.cyan),
         ]),
     ]);
