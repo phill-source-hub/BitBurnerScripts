@@ -27,6 +27,8 @@
  *     - 4S buy order: highest forecast first so best opportunities get most capital
  *
  * Changelog:
+ *   v1.7.0 - Trend mode sell fixes: profit threshold relaxed to profitIfSold>0,
+ *            percentage-based stop-loss (TREND_STOPLOSS_PCT=10%) when no 4S.
  *   v1.6.0 - All 5 efficiency guards: position cap, profit threshold, 4S stop-loss,
  *            forecast-sorted buys, churn prevention cooldown.
  *   v1.5.0 - Never sell at a loss: only sell when profitIfSold > 0.
@@ -53,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.6.1';
+const VERSION   = '1.7.0';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -69,8 +71,11 @@ const TREND_DOWN_MIN = 3;
 // Commission per transaction
 const COMMISSION = 100e3;
 
-// Minimum profit over commission required before exiting a position
+// Minimum profit over commissions required before exiting (4S mode only)
 const MIN_PROFIT_OVER_COMMISSION = COMMISSION;
+
+// Trend mode stop-loss: sell if position is down more than this fraction from avg cost
+const TREND_STOPLOSS_PCT = 0.10;
 
 // Maximum fraction of deployable cash to put into any single symbol
 const POSITION_CAP_FRAC = 0.20;
@@ -222,12 +227,16 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
 
         if (longShares <= 0) continue;
 
-        const profitIfSold = (bid - longAvgPx) * longShares - 2 * COMMISSION;
-        const stopLoss     = has4S && forecast < STOPLOSS_4S;
+        const profitIfSold   = (bid - longAvgPx) * longShares - 2 * COMMISSION;
+        const stopLoss4S     = has4S && forecast < STOPLOSS_4S;
+        const stopLossTrend  = !has4S && longAvgPx > 0 && bid < longAvgPx * (1 - TREND_STOPLOSS_PCT);
+        const profitOk       = has4S
+            ? profitIfSold > MIN_PROFIT_OVER_COMMISSION
+            : profitIfSold > 0;
 
-        // Sell if: signal says sell AND profit clears threshold, OR stop-loss fires
-        const shouldSell = (signal === 'sell' && profitIfSold > MIN_PROFIT_OVER_COMMISSION)
-                        || stopLoss;
+        const shouldSell = (signal === 'sell' && profitOk)
+                        || stopLoss4S
+                        || stopLossTrend;
 
         if (shouldSell) {
             const proceeds = ns.stock.sellStock(sym, longShares);
@@ -238,7 +247,9 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
                 cycleSells++;
                 cashLeft += proceeds;
                 cooldown[sym] = CHURN_COOLDOWN;
-                const reason = stopLoss ? 'STOPLOSS f=' + (forecast).toFixed(2) : 'signal';
+                const reason = stopLoss4S    ? 'STOPLOSS f=' + forecast.toFixed(2)
+                             : stopLossTrend ? 'STOPLOSS -' + (TREND_STOPLOSS_PCT * 100).toFixed(0) + '%'
+                             : 'signal';
                 ns.print('[STOCKS] SELL ' + sym + ' (' + reason + ')' +
                     ' | profit:' + (profit >= 0 ? '+' : '') + ns.format.number(profit) +
                     ' | session:' + (stats.realised >= 0 ? '+' : '') + ns.format.number(stats.realised));
