@@ -25,6 +25,10 @@
  *     Bladeburner — rank, current action
  *
  * Changelog:
+ *   v1.5.0 - Fix button clicks: NS can't be called from React event handlers either.
+ *            cmdQueue (module-level array) collects click intents; main loop drains
+ *            it with ns.scriptKill / ns.exec each iteration.
+ *            Add CURRENCY constant (default '£'). fmtMoney() wraps fmtNum with it.
  *   v1.4.0 - Architectural fix: all NS calls moved to main() loop (valid async
  *            context). React component reads a shared data object via pure-JS
  *            setInterval — no NS calls in React at all. NS functions throw when
@@ -48,10 +52,13 @@
  * RAM: ~4.5 GB
  */
 
-const VERSION    = '1.4.0';
+const VERSION    = '1.5.0';
 const POLL_MS    = 2000;
 const STALE_MS   = 2 * 60 * 1000;
 const TIER_MIN   = 2;
+
+// Currency symbol — no NS API to read game setting; change here to match yours
+const CURRENCY    = '£';
 
 const TAIL_W      = 680;
 const TAIL_H      = 820;
@@ -108,6 +115,10 @@ function fmtNum(n, decimals) {
     return v.toFixed(decimals) + suffixes[i];
 }
 
+function fmtMoney(n, decimals) {
+    return CURRENCY + fmtNum(n, decimals);
+}
+
 function safeParse(raw) {
     try { return JSON.parse(raw); } catch (_) { return null; }
 }
@@ -128,6 +139,10 @@ const INIT_DATA = {
 // Single shared reference; main() mutates this each poll cycle.
 // React reads it on its own tick — no NS calls in React context.
 let sharedData = Object.assign({}, INIT_DATA);
+
+// Command queue — onClick pushes pure-JS objects, main() drains with NS calls.
+// NS functions can't be called from React event handlers (same restriction as timers).
+const cmdQueue = [];
 
 /**
  * Collects all game state via NS. Called only from main()'s async loop —
@@ -233,7 +248,7 @@ function Dashboard(props) {
     }, [
         renderHeader(d, ns),
         renderRamRow(d),
-        renderScripts(d, ns),
+        renderScripts(d),
         renderHWGW(d),
         renderHacknet(d),
         renderShare(d),
@@ -269,8 +284,8 @@ function renderHeader(d, ns) {
         e('div', { key: 'stats', style: { display: 'flex', gap: '16px', flexWrap: 'wrap' } }, [
             statChip('tier', 'T' + tier,          C.cyan),
             statChip('hack', hack,                 C.blue),
-            statChip('$',    fmtNum(money,  2),    C.green),
-            statChip('/s',   fmtNum(income, 2),    C.green),
+            statChip(CURRENCY,      fmtNum(money,  2), C.green),
+            statChip(CURRENCY + '/s', fmtNum(income, 2), C.green),
         ]),
     ]);
 }
@@ -330,11 +345,11 @@ function ramPanel(label, used, max, pct, sub) {
 // Script controls
 // =============================================================================
 
-function renderScripts(d, ns) {
+function renderScripts(d) {
     var active   = MANAGED.filter(function(m) { return  d.running.has(m.script); });
     var inactive = MANAGED.filter(function(m) { return !d.running.has(m.script); });
 
-    var activeRows = active.map(function(m) { return scriptRowActive(m, ns); });
+    var activeRows = active.map(function(m) { return scriptRowActive(m); });
 
     var inactiveGrid = inactive.length === 0 ? null :
         e('div', {
@@ -346,7 +361,7 @@ function renderScripts(d, ns) {
                 paddingTop: active.length > 0 ? '5px' : '0',
                 borderTop: active.length > 0 ? '1px solid ' + C.border : 'none',
             },
-        }, inactive.map(function(m) { return scriptChipInactive(m, ns); }));
+        }, inactive.map(function(m) { return scriptChipInactive(m); }));
 
     return e('div', {
         key: 'scripts', style: panel(),
@@ -357,8 +372,8 @@ function renderScripts(d, ns) {
     ]);
 }
 
-function scriptRowActive(m, ns) {
-    var onClick = function() { ns.scriptKill(m.script, 'home'); };
+function scriptRowActive(m) {
+    var onClick = function() { cmdQueue.push({ action: 'kill', script: m.script }); };
     return e('div', {
         key: m.script,
         style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 0' },
@@ -369,8 +384,8 @@ function scriptRowActive(m, ns) {
     ]);
 }
 
-function scriptChipInactive(m, ns) {
-    var onClick = function() { ns.run(m.script, 1, ...m.args); };
+function scriptChipInactive(m) {
+    var onClick = function() { cmdQueue.push({ action: 'run', script: m.script, args: m.args }); };
     return e('div', {
         key: m.script,
         style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1px 0' },
@@ -483,8 +498,8 @@ function renderCorp(d) {
     return e('div', { key: 'corp', style: panel() }, [
         sectionHead('CORPORATION'),
         e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
-            statChip('funds',  '$' + fmtNum(cd.funds,   2), C.green),
-            statChip('rev/s',  '$' + fmtNum(cd.revenue, 2), C.green),
+            statChip('funds',  fmtMoney(cd.funds,   2), C.green),
+            statChip('rev/s',  fmtMoney(cd.revenue, 2), C.green),
             statChip('divs',   cd.divs,                      C.cyan),
         ]),
     ]);
@@ -592,6 +607,14 @@ export async function main(ns) {
     // Main poll loop — the ONLY place NS functions are called.
     // All NS calls here are in a valid async script context.
     while (true) {
+        // Drain command queue from button clicks before collecting data
+        while (cmdQueue.length > 0) {
+            const cmd = cmdQueue.shift();
+            try {
+                if (cmd.action === 'kill') ns.scriptKill(cmd.script, 'home');
+                if (cmd.action === 'run')  ns.exec(cmd.script, 'home', 1, ...(cmd.args || []));
+            } catch (_) {}
+        }
         try { collectData(ns); } catch (_) {}
         await ns.sleep(POLL_MS);
     }
