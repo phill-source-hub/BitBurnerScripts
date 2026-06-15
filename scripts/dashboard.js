@@ -1,6 +1,6 @@
 /**
  * dashboard.js
- * Version: 1.4.0
+ * Version: 1.6.0
  *
  * Interactive React operations dashboard for PhlanxOS.
  *
@@ -25,6 +25,10 @@
  *     Bladeburner — rank, current action
  *
  * Changelog:
+ *   v1.6.0 - Faction section (current faction, rep, favour via singularity API).
+ *            LOG button per active script: queues tail open via cmdQueue.
+ *            HWGW: show all 5 targets with mode + thread counts (H/WH/G/WG).
+ *            Requires orchestrate v1.7.0+ port 1 format for thread data.
  *   v1.5.0 - Fix button clicks: NS can't be called from React event handlers either.
  *            cmdQueue (module-level array) collects click intents; main loop drains
  *            it with ns.scriptKill / ns.exec each iteration.
@@ -52,7 +56,7 @@
  * RAM: ~4.5 GB
  */
 
-const VERSION    = '1.5.0';
+const VERSION    = '1.6.0';
 const POLL_MS    = 2000;
 const STALE_MS   = 2 * 60 * 1000;
 const TIER_MIN   = 2;
@@ -133,7 +137,7 @@ const INIT_DATA = {
     sharePow: 1, hwgwData: null, hacknetData: null, stale: true,
     farmMax: 0, farmUsed: 0, farmCount: 0, farmLimit: 0,
     targets: {}, cycleStart: 0, corpData: null, bbData: null,
-    now: Date.now(), income: [0, 0],
+    now: Date.now(), income: [0, 0], factionData: null,
 };
 
 // Single shared reference; main() mutates this each poll cycle.
@@ -204,13 +208,32 @@ function collectData(ns) {
     let income = [0, 0];
     try { income = ns.getTotalScriptIncome(); } catch (_) {}
 
+    let factionData = null;
+    try {
+        const sing = ns['singularity'];
+        // Prefer currently-worked faction, fall back to most recently joined
+        let fac = null;
+        const work = player.currentWork;
+        if (work && work.type === 'FACTION') {
+            fac = work.factionName;
+        } else {
+            const joined = player.factions || [];
+            if (joined.length > 0) fac = joined[joined.length - 1];
+        }
+        if (fac) {
+            const rep    = sing['getFactionRep'](fac);
+            const favour = sing['getFactionFavor'](fac);
+            factionData = { name: fac, rep, favour };
+        }
+    } catch (_) {}
+
     // Mutate sharedData in place so React's getData() always reads current values
     sharedData = {
         player, homeMax, homeUsed, running,
         sharePow, hwgwData, hacknetData, stale,
         farmMax, farmUsed, farmCount, farmLimit,
         targets, cycleStart, corpData, bbData,
-        now: Date.now(), income,
+        now: Date.now(), income, factionData,
     };
 }
 
@@ -247,6 +270,7 @@ function Dashboard(props) {
         },
     }, [
         renderHeader(d, ns),
+        renderFaction(d),
         renderRamRow(d),
         renderScripts(d),
         renderHWGW(d),
@@ -294,6 +318,23 @@ function statChip(label, value, col) {
     return e('span', { key: label }, [
         e('span', { key: 'l', style: { color: C.dim } }, label + ' '),
         e('span', { key: 'v', style: { color: col } }, String(value)),
+    ]);
+}
+
+function renderFaction(d) {
+    var fd = d.factionData;
+    if (!fd) return null;
+    return e('div', {
+        key: 'faction',
+        style: {
+            margin: '4px 0', background: C.surface,
+            border: '1px solid ' + C.border, borderRadius: '4px', padding: '4px 6px',
+            display: 'flex', gap: '16px', alignItems: 'center', fontSize: '11px', flexWrap: 'wrap',
+        },
+    }, [
+        e('span', { key: 'n', style: { color: C.purple, fontWeight: 'bold', minWidth: '100px' } }, fd.name),
+        statChip('rep',    fmtNum(fd.rep,    0), C.blue),
+        statChip('favour', Math.floor(fd.favour), C.cyan),
     ]);
 }
 
@@ -373,14 +414,16 @@ function renderScripts(d) {
 }
 
 function scriptRowActive(m) {
-    var onClick = function() { cmdQueue.push({ action: 'kill', script: m.script }); };
+    var onStop = function() { cmdQueue.push({ action: 'kill', script: m.script }); };
+    var onLog  = function() { cmdQueue.push({ action: 'tail', script: m.script }); };
     return e('div', {
         key: m.script,
         style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 0' },
     }, [
         e('span', { key: 'dot',  style: { color: C.green, marginRight: '5px', fontSize: '10px' } }, '●'),
         e('span', { key: 'name', style: { flex: 1, color: C.text, fontSize: '11px' } }, m.label),
-        e('button', { key: 'btn', onClick: onClick, style: btnStyle(C.red) }, 'STOP'),
+        e('button', { key: 'log',  onClick: onLog,  style: Object.assign({}, btnStyle(C.dim),  { marginRight: '3px' }) }, 'LOG'),
+        e('button', { key: 'stop', onClick: onStop, style: btnStyle(C.red) }, 'STOP'),
     ]);
 }
 
@@ -408,6 +451,41 @@ function btnStyle(col) {
 // HWGW targets
 // =============================================================================
 
+function hwgwModeColor(mode) {
+    if (mode === 'HACK') return C.green;
+    if (mode === 'PREP') return C.yellow;
+    if (mode === 'SKIP') return C.blue;
+    if (mode === 'WAIT') return C.purple;
+    return C.dim;
+}
+
+function hwgwThreadStr(entry) {
+    var mode = entry.mode || '';
+    if (mode === 'HACK' || mode === 'SKIP') {
+        var parts = [];
+        if (entry.H  ) parts.push('H:'  + entry.H);
+        if (entry.WH ) parts.push('WH:' + entry.WH);
+        if (entry.G  ) parts.push('G:'  + entry.G);
+        if (entry.WG ) parts.push('WG:' + entry.WG);
+        return parts.join(' ');
+    }
+    if (mode === 'PREP') {
+        var parts = [];
+        if (entry.G) parts.push('G:' + entry.G);
+        if (entry.W) parts.push('W:' + entry.W);
+        return parts.join(' ');
+    }
+    return '';
+}
+
+function hwgwRemain(entry, now) {
+    var cycleEnd = entry.cycleEnd || 0;
+    if (!cycleEnd) return '';
+    var rem = Math.max(0, cycleEnd - now);
+    if (rem < 1000) return 'done';
+    return Math.floor(rem / 60000) + 'm' + Math.floor((rem % 60000) / 1000) + 's';
+}
+
 function renderHWGW(d) {
     var targetKeys = Object.keys(d.targets);
 
@@ -415,30 +493,30 @@ function renderHWGW(d) {
         ? [e('div', { key: 'none', style: { color: C.dim, fontSize: '11px' } },
             d.stale ? 'Port 1 stale — orchestrate not running?' : 'No active targets')]
         : targetKeys.map(function(host) {
-            var entry      = d.targets[host];
-            var mode       = entry.mode || 'PREP';
-            var weakenTime = entry.weakenTime || 0;
-            var elapsed    = d.now - d.cycleStart;
-            var remainMs   = Math.max(0, weakenTime - elapsed);
-            var modeCol    = mode === 'HACK' ? C.green : mode === 'TIER0' ? C.cyan : C.yellow;
-            var remainS    = remainMs < 1000 ? 'done'
-                : Math.floor(remainMs / 60000) + 'm ' + Math.floor((remainMs % 60000) / 1000) + 's';
+            var entry   = d.targets[host];
+            var mode    = entry.mode || 'PREP';
+            var modeCol = hwgwModeColor(mode);
+            var threads = hwgwThreadStr(entry);
+            var remain  = hwgwRemain(entry, d.now);
 
             return e('div', {
                 key: host,
                 style: {
-                    display: 'grid', gridTemplateColumns: '1fr auto auto',
+                    display: 'grid', gridTemplateColumns: '120px 1fr auto',
                     alignItems: 'center', gap: '6px', padding: '2px 0',
-                    borderBottom: '1px solid ' + C.border, fontSize: '11px',
+                    borderBottom: '1px solid ' + C.border, fontSize: '10px',
                 },
             }, [
-                e('span', { key: 'h', style: { color: C.text } }, host),
-                e('span', { key: 'm', style: { color: modeCol, minWidth: '40px', textAlign: 'right' } }, '[' + mode + ']'),
-                e('span', { key: 't', style: { color: C.dim, minWidth: '55px', textAlign: 'right' } }, remainS),
+                e('span', { key: 'h',  style: { color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, host),
+                e('span', { key: 'th', style: { color: C.dim } }, threads),
+                e('div',  { key: 'r',  style: { display: 'flex', gap: '6px', alignItems: 'center', justifyContent: 'flex-end' } }, [
+                    e('span', { key: 'm', style: { color: modeCol, minWidth: '42px', textAlign: 'right', fontSize: '10px' } }, '[' + mode + ']'),
+                    e('span', { key: 't', style: { color: C.dim, minWidth: '50px', textAlign: 'right' } }, remain),
+                ]),
             ]);
         });
 
-    return e('div', { key: 'hwgw', style: panel() }, [sectionHead('HWGW TARGETS')].concat(rows));
+    return e('div', { key: 'hwgw', style: panel() }, [sectionHead('HWGW TARGETS  ' + targetKeys.length)].concat(rows));
 }
 
 
@@ -613,6 +691,7 @@ export async function main(ns) {
             try {
                 if (cmd.action === 'kill') ns.scriptKill(cmd.script, 'home');
                 if (cmd.action === 'run')  ns.exec(cmd.script, 'home', 1, ...(cmd.args || []));
+                if (cmd.action === 'tail') ns.ui.openTail(cmd.script, 'home');
             } catch (_) {}
         }
         try { collectData(ns); } catch (_) {}

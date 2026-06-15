@@ -297,8 +297,14 @@ function calcBatchThreadsFallback(ns, target, maxThreads) {
     const maxMoney        = ns.getServerMaxMoney(target);
     const weakenPerThread = ns.weakenAnalyze(1);
 
+    // Money depleted (post-hack, grow not yet landed) — return null silently.
+    // WAIT-HACK handler upstream already manages this state.
+    const curMoney = ns.getServerMoneyAvailable(target);
+    if (curMoney < maxMoney * MIN_STEAL) return null;
+
     function threadsForSteal(fraction) {
-        const rawHack = ns.hackAnalyzeThreads(target, maxMoney * fraction);
+        const hackAmount = Math.min(curMoney, maxMoney) * fraction;
+        const rawHack = ns.hackAnalyzeThreads(target, hackAmount);
         if (!isFinite(rawHack) || rawHack < 0) return null;
         const hackThreads    = Math.max(1, Math.floor(rawHack));
         const hackSecInc     = ns.hackAnalyzeSecurity(hackThreads, target);
@@ -647,6 +653,7 @@ async function runFullMode(ns, ladderThreads) {
 
             if (cycleEnds[t.host] && cycleEnds[t.host] > now) {
                 log(ns, '[SKIP] ' + t.host + ' — cycle ends in ' + formatTime(cycleEnds[t.host] - now));
+                targetTiming[t.host] = { mode: 'SKIP', cycleEnd: cycleEnds[t.host], weakenTime: cycleEnds[t.host] - now };
                 continue;
             }
 
@@ -657,6 +664,7 @@ async function runFullMode(ns, ladderThreads) {
                 if (hackMode.has(t.host)) {
                     const wt = ns.getWeakenTime(t.host);
                     cycleEnds[t.host] = now + wt;
+                    targetTiming[t.host] = { mode: 'WAIT', cycleEnd: now + wt, weakenTime: wt };
                     log(ns, '[WAIT-HACK] ' + t.host + ' — money depleted, waiting for grow');
                 } else {
                     log(ns, '[HACK] ' + t.host + ' — thread calc failed, skipping');
@@ -704,7 +712,7 @@ async function runFullMode(ns, ladderThreads) {
             hackMode.add(t.host);
 
             cycleEnds[t.host]    = now + weakenTime + LAND_SPACING * 4;
-            targetTiming[t.host] = { weakenTime, mode: 'HACK' };
+            targetTiming[t.host] = { weakenTime, mode: 'HACK', cycleEnd: cycleEnds[t.host], H: batch.hackThreads, WH: batch.weakenHThreads, G: batch.growThreads, WG: batch.weakenGThreads };
 
             log(ns, '[HACK] ' + t.host + ' | steal:' + (batch.stealFraction * 100).toFixed(1) + '% | H:' + batch.hackThreads + ' WH:' + batch.weakenHThreads + ' G:' + batch.growThreads + ' WG:' + batch.weakenGThreads + ' | total:' + batch.totalThreads + ' | cycle:' + formatTime(weakenTime));
         }
@@ -747,13 +755,13 @@ async function runFullMode(ns, ladderThreads) {
                                 prepLaunched++;
 
                                 cycleEnds[t.host]    = now + Math.max(growTime, weakenTime) + 500;
-                                targetTiming[t.host] = { weakenTime, mode: 'PREP' };
+                                targetTiming[t.host] = { weakenTime, mode: 'PREP', cycleEnd: cycleEnds[t.host], G: prep.growThreads, W: prep.weakenThreads };
 
                                 const sec    = ns.getServerSecurityLevel(t.host);
                                 const minSec = ns.getServerMinSecurityLevel(t.host);
                                 const money  = ns.getServerMoneyAvailable(t.host);
                                 const maxMon = ns.getServerMaxMoney(t.host);
-                                log(ns, '[PREP-' + prep.phase + '] ' + t.host + ' | sec:' + sec.toFixed(1) + '/' + minSec.toFixed(1) + ' | $' + ns.format.number(money, '0.0a') + '/$' + ns.format.number(maxMon, '0.0a') + ' | G:' + prep.growThreads + ' W:' + prep.weakenThreads + ' | ~' + formatTime(weakenTime));
+                                log(ns, '[PREP-' + prep.phase + '] ' + t.host + ' | sec:' + sec.toFixed(1) + '/' + minSec.toFixed(1) + ' | $' + ns.format.number(money, 1) + '/$' + ns.format.number(maxMon, 1) + ' | G:' + prep.growThreads + ' W:' + prep.weakenThreads + ' | ~' + formatTime(weakenTime));
                             }
                         }
                     }
@@ -761,7 +769,18 @@ async function runFullMode(ns, ladderThreads) {
             }
         }
 
-        // Write cycle timing to port 1 for status.js
+        // Ensure every tracked target has an entry so dashboard shows full picture
+        for (const t of targets) {
+            if (!targetTiming[t.host]) {
+                targetTiming[t.host] = {
+                    mode: hackMode.has(t.host) ? 'WAIT' : 'QUEUE',
+                    cycleEnd: cycleEnds[t.host] || 0,
+                    weakenTime: 0,
+                };
+            }
+        }
+
+        // Write cycle timing to port 1 for status.js / dashboard
         clearPort(ns, PORT_STATUS);
         writePort(ns, PORT_STATUS, { cycleStart: now, targets: targetTiming });
 
