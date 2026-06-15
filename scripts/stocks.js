@@ -53,7 +53,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.6.0';
+const VERSION   = '1.6.1';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -216,13 +216,13 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
         const { sym, bid, longShares, longAvgPx, forecast, signal } = d;
 
         if (longShares > 0) {
-            unrealised += (bid - longAvgPx) * longShares - COMMISSION;
+            unrealised += (bid - longAvgPx) * longShares - 2 * COMMISSION;
             openPositions++;
         }
 
         if (longShares <= 0) continue;
 
-        const profitIfSold = (bid - longAvgPx) * longShares - COMMISSION;
+        const profitIfSold = (bid - longAvgPx) * longShares - 2 * COMMISSION;
         const stopLoss     = has4S && forecast < STOPLOSS_4S;
 
         // Sell if: signal says sell AND profit clears threshold, OR stop-loss fires
