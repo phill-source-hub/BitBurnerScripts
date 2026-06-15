@@ -65,7 +65,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '1.9.0';
+const VERSION     = '1.9.1';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds — used identically for estimated and 4S forecasts
@@ -300,7 +300,7 @@ function tick(ns, lastPrice, upHistory, cooldown, moneyFloor, stats) {
     if (canBuy) {
         const buyable = symData
             .filter(d => d.signal === 'buy')
-            .filter(d => d.longShares < d.maxShares)
+            .filter(d => has4S ? d.longShares < d.maxShares : d.longShares === 0)
             .filter(d => !cooldown[d.sym])
             .sort((a, b) => (b.forecast || 0) - (a.forecast || 0));
 
