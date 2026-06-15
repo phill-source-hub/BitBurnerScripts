@@ -37,6 +37,9 @@
  *   v1.9.0 - Add grafting.js (tier 1+), go.js (tier 1+), stanek.js (tier 2+).
  *   v1.8.0 - Add sleeve.js (tier 1+), bladeburner.js (tier 1+), corporation.js (tier 2+).
  *   v1.7.0 - Add dashboard.js (tier 2+). Add --no-dashboard flag.
+ *   v2.1.0 - Move singularity.js to tier 0. At 8GB home, exec() returns 0 if RAM is
+ *            too tight — bootstrap skips gracefully. Singularity buys TOR/crackers/home
+ *            RAM upgrades on first cycle, breaking the tier 0 income stall on new BN.
  *   v1.6.0 - Add singularity.js, stocks.js, gang.js (all tier 1+, self-gate at runtime).
  *            Add share-manager.js (tier 1+) and contracts.js (tier 1+).
  *   v1.4.0 - Remove auto-root and buy-servers from launch sequence. Both now
@@ -136,7 +139,7 @@ const TIER_REQUIREMENTS = {
     [SCRIPT_STATUS]      : 3,
     [SCRIPT_SHARE]       : 1,
     [SCRIPT_CONTRACTS]   : 1,
-    [SCRIPT_SINGULARITY] : 1,
+    [SCRIPT_SINGULARITY] : 0,
     [SCRIPT_STOCKS]      : 1,
     [SCRIPT_GANG]        : 1,
     [SCRIPT_DASHBOARD]   : 2,
@@ -205,7 +208,7 @@ export async function main(ns) {
     ]);
 
     if (flags.help) {
-        ns.tprint('=== bootstrap.js v2.0.0 ===');
+        ns.tprint('=== bootstrap.js v2.1.0 ===');
         ns.tprint('Purpose: Kills and relaunches all managed scripts for the detected RAM tier.');
         ns.tprint('Usage:   run /scripts/bootstrap.js [flags]');
         ns.tprint('Flags:');
@@ -234,7 +237,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== bootstrap.js v1.7.0 ===');
+    ns.tprint('=== bootstrap.js v2.1.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
