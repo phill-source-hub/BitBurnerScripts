@@ -55,7 +55,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION   = '1.7.0';
+const VERSION   = '1.7.1';
 const PORT_STOCKS = 4;
 
 // 4S trading thresholds
@@ -293,6 +293,15 @@ function tick(ns, priceHistory, cooldown, moneyFloor, stats, allowTrend) {
         ns.print('[STOCKS] Cycle: no trades | mode:' + (has4S ? '4S' : 'trend') +
             ' | open:' + openPositions +
             ' | unrealised:' + (unrealised >= 0 ? '+' : '') + ns.format.number(unrealised));
+        // Per-position signal debug (only when open positions exist)
+        for (const d of symData) {
+            if (d.longShares <= 0) continue;
+            const profitIfSold = (d.bid - d.longAvgPx) * d.longShares - 2 * COMMISSION;
+            const stopLossTrend = !has4S && d.longAvgPx > 0 && d.bid < d.longAvgPx * (1 - TREND_STOPLOSS_PCT);
+            ns.print('  ' + d.sym + ' sig:' + d.signal
+                + ' profit:' + (profitIfSold >= 0 ? '+' : '') + ns.format.number(profitIfSold)
+                + (stopLossTrend ? ' STOPLOSS' : ''));
+        }
     }
 
     writePort(ns, {
