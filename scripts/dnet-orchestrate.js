@@ -35,6 +35,10 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.4.2 - Fallback to inline sequential cracking when worker exec fails (no
+ *            exec session on hub). Attempt hub self-session on startup via
+ *            connectToSession(host, '') — if OK, workers can exec; if not, inline
+ *            takes over transparently. Removes duplicate MANUAL log from worker path.
  *   v1.4.1 - Only one crack worker at a time — worker fills all free RAM so a
  *            second exec in the same cycle always fails. Defer additional
  *            servers until the running worker exits. Add freeRam/threads
@@ -123,7 +127,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.4.1 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.4.2 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -140,10 +144,20 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.4.1 ===');
+    log(ns, '=== dnet-orchestrate.js v1.4.2 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from any previous run
+
+    // If running on a darknet hub, attempt a self-session so exec() onto this host works.
+    // Hub nodes (passwordLength=0) auto-grant sessions — try connectToSession with blank password.
+    // This enables threading via crack workers; falls back to inline cracking if it fails.
+    const selfHost    = ns.getHostname();
+    const selfDetails = ns.dnet.getServerDetails(selfHost);
+    if (selfDetails && (selfDetails.isStationary || selfDetails.passwordLength === 0)) {
+        const r = ns.dnet.connectToSession(selfHost, '');
+        log(ns, 'Hub self-session on ' + selfHost + ': ' + (r.success ? 'OK — workers can exec here' : 'FAILED code=' + r.code + ' — will crack inline'));
+    }
 
     // Load any previously cracked creds from port 6 into state map
     loadCredsFromPort(ns);
@@ -241,9 +255,19 @@ async function runCycle(ns, flags) {
                 log(ns, 'CRACK DEFER ' + host + ' — another worker already running');
                 continue;
             }
-            // No active worker — launch one (or log manual-crack note if non-numeric/too long)
+            // Try threaded worker first (needs exec session on this host).
+            // Falls back to inline sequential cracking if worker exec fails.
             s.crackPid = await launchCrackWorker(ns, host, d);
-            continue;                                                               // Wait for worker result before proceeding with this host
+            if (s.crackPid > 0) {
+                continue;                                                            // Worker launched — result arrives next cycle
+            }
+            // Worker exec failed (no exec session on hub) — crack inline instead
+            const pw = await crackInline(ns, host, d);
+            if (pw) {
+                s.password = pw;
+                saveCredToPort(ns, host, pw);
+            }
+            continue;
         }
 
         // Ensure session is active — may have been lost if mutation killed the server
@@ -317,6 +341,41 @@ function checkCrackResults(ns) {
 }
 
 /**
+ * Inline sequential brute-force — used when exec onto this host is not permitted.
+ * Tries all numeric passwords up to AUTO_CRACK_MAX_LEN, one attempt per iteration.
+ * authenticate() already yields to the engine each call, so no extra sleep needed.
+ * @param {NS} ns - Netscript object
+ * @param {string} host - Hostname of the target server
+ * @param {object} d - DarknetServerDetails for the target
+ * @returns {Promise<string|null>} Password on success, null on failure or non-crackable
+ */
+async function crackInline(ns, host, d) {
+    if (d.passwordFormat !== 'numeric' || d.passwordLength > AUTO_CRACK_MAX_LEN) {
+        log(ns, 'MANUAL ' + host + ' — ' + d.passwordFormat + ' len=' + d.passwordLength
+            + '  hint: ' + (d.passwordHint || 'none'));
+        return null;
+    }
+
+    const total = Math.pow(10, d.passwordLength);
+    log(ns, 'Cracking inline ' + host + ' (' + total + ' combos, 1 thread)...');
+
+    for (let i = 0; i < total; i++) {
+        const pw = String(i).padStart(d.passwordLength, '0');
+        const r  = await ns.dnet.authenticate(host, pw);
+        if (r.success) {
+            log(ns, 'CRACKED ' + host + ' = ' + pw);
+            return pw;
+        }
+        if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') {
+            await ns.sleep(RATE_LIMIT_SLEEP_MS);
+        }
+    }
+
+    log(ns, 'CRACK FAILED ' + host + ' — exhausted ' + total + ' combos');
+    return null;
+}
+
+/**
  * Execs dnet-crack-worker.js on the current host with as many threads as fit
  * in free RAM. More threads = faster per authenticate() call per the API.
  * Returns the worker PID (> 0) on success, or 0 if the server cannot be auto-cracked.
@@ -327,9 +386,7 @@ function checkCrackResults(ns) {
  */
 async function launchCrackWorker(ns, host, d) {
     if (d.passwordFormat !== 'numeric' || d.passwordLength > AUTO_CRACK_MAX_LEN) {
-        log(ns, 'MANUAL ' + host + ' — ' + d.passwordFormat + ' len=' + d.passwordLength
-            + '  hint: ' + (d.passwordHint || 'none'));
-        return 0;
+        return 0;                                                                    // Caller (crackInline) will log MANUAL
     }
 
     // Heartbleed peek — surface any clues from prior attempts before launching worker
