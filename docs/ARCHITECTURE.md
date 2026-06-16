@@ -133,13 +133,22 @@ home:dnet-orchestrate.js
   → SCP stasis worker to darkweb, exec (12 GB), wait one cycle
   → RAM freed, stasis confirmed
   → SCP + exec dnet-orchestrate.js onto darkweb
+  → propagateToStasisLinked(): for each stasis-linked server with known password
+      → connectToSession(host, pw) at any distance (stasis enables this)
+      → exec dnet-orchestrate.js onto depth-0 / depth-1 / deeper servers
+
        darkweb:dnet-orchestrate.js
-         → exec dnet-crack-worker.js (N threads, fills free RAM)
-         → crack result arrives port 7 next cycle
-         → connectToSession() restores session
-         → exec dnet-phish.js onto depth-0 server
+         → crackInline() depth-0 servers (ZeroLogon → "" or numeric brute-force)
+         → exec dnet-phish.js onto depth-0 server (reserves ORCH_RAM_GB)
          → exec dnet-stasis-set.js onto depth-0 server
-         → (future) propagate to deeper layers
+         → propagateToStasisLinked() (for depth-1+ servers, home handles these)
+
+       depth-0:dnet-orchestrate.js  (exec'd by home via stasis remote exec)
+         → crackInline() depth-1 servers
+         → exec dnet-phish.js onto depth-1 server
+         → exec dnet-stasis-set.js onto depth-1 server
+         → propagateToStasisLinked() triggers home to push into depth-2
+         → (recursive — each layer enables the next)
 ```
 
 ### Darknet Port Conventions

@@ -27,7 +27,12 @@
  *               stasis limit, prioritised by shallowest depth: SCPs
  *               dnet-stasis-set.js then exec()s onto the target (requires
  *               STASIS_RAM_GB free on target).
- *   7. WAIT   — nextMutation() sleeps until the next network mutation event.
+ *   7. EXPAND — propagateToStasisLinked(): for stasis-linked servers NOT in
+ *               probe() list (i.e. deeper than current host), gets a session
+ *               via connectToSession() and exec()s orchestrator onto them.
+ *               Stasis links enable exec at any distance per the darknet API.
+ *               Enables recursive depth expansion: home→darkweb→depth0→depth1→…
+ *   8. WAIT   — nextMutation() sleeps until the next network mutation event.
  *
  *   Session note: authenticate() and connectToSession() sessions are bound to
  *   this script's PID. memoryReallocation() and exec() onto darknet servers
@@ -35,6 +40,10 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.7.0 - Stasis expansion: propagateToStasisLinked() execs orchestrator onto
+ *            stasis-linked servers not in current probe() list. Stasis allows
+ *            exec at any distance, enabling home→depth0→depth1→… propagation.
+ *            ensurePhish reserves ORCH_RAM_GB so orchestrator fits alongside phish.
  *   v1.6.0 - Fix hub vs ZeroLogon detection: hub = isStationary OR (passwordLength=0
  *            AND hasSession already granted). ZeroLogon servers have passwordLength=0
  *            but hasSession=false and must be cracked with authenticate(host,'').
@@ -117,7 +126,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.6.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.7.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -134,7 +143,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.6.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.7.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     // Load any previously cracked creds from port 6 into state map
@@ -257,6 +266,10 @@ async function runCycle(ns, flags) {
             }
         }
     }
+
+    // Propagate orchestrator to stasis-linked servers not in this host's probe() list.
+    // Stasis links enable exec at any distance — home can reach depth-0, depth-1, etc.
+    await propagateToStasisLinked(ns, new Set(visible));
 }
 
 
@@ -445,13 +458,14 @@ async function freeMemory(ns, host, initialBlocked) {
 async function ensurePhish(ns, host, prevPid) {
     if (prevPid > 0 && ns.isRunning(prevPid)) return prevPid;                      // Script still alive — no action needed
 
-    const maxRam  = ns.getServerMaxRam(host);
-    const usedRam = ns.getServerUsedRam(host);
-    const freeRam = maxRam - usedRam;
-    const threads = Math.floor(freeRam / PHISH_RAM_GB);                            // Fill all free RAM with phish threads
+    const maxRam    = ns.getServerMaxRam(host);
+    const usedRam   = ns.getServerUsedRam(host);
+    const freeRam   = maxRam - usedRam;
+    const available = freeRam - ORCH_RAM_GB;                                        // Reserve ORCH_RAM_GB for a future orchestrator propagating deeper
+    const threads   = Math.floor(available / PHISH_RAM_GB);                         // Fill remaining RAM with phish threads
 
     if (threads < 1) {
-        log(ns, 'PHISH SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ' + PHISH_RAM_GB + ')');
+        log(ns, 'PHISH SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free after ' + ORCH_RAM_GB + ' GB reserved (need ' + PHISH_RAM_GB + ')');
         return 0;
     }
 
@@ -578,6 +592,71 @@ async function propagateToHub(ns, host) {
     }
 
     log(ns, 'HUB propagated orchestrate to ' + host + ' pid=' + pid);
+}
+
+
+// =============================================================================
+// Stasis expansion
+// =============================================================================
+
+/**
+ * Propagates the orchestrator to stasis-linked servers not visible in the current
+ * host's probe() list. Stasis links allow exec at any distance — home can reach
+ * depth-0, depth-1, etc. directly without needing to be adjacent.
+ *
+ * Requires a known password (port 6) and connectToSession() to get a session first.
+ * Skips servers already in the probe() visible set (handled by hub propagation).
+ * Skips servers where the orchestrator is already running.
+ *
+ * @param {NS} ns - Netscript object
+ * @param {Set<string>} skip - Hostnames already handled this cycle (probe() result)
+ * @returns {Promise<void>}
+ */
+async function propagateToStasisLinked(ns, skip) {
+    const stasisLinked = ns.dnet.getStasisLinkedServers();
+    if (stasisLinked.length === 0) return;
+
+    const creds = readPort(ns, PORT_DNET_CREDS) || [];
+    if (creds.length === 0) return;
+
+    for (const host of stasisLinked) {
+        if (skip.has(host)) continue;                                               // In probe() list — already handled by hub/server loop
+        if (ns.isRunning(ORCH_SCRIPT, host)) continue;                             // Already running — nothing to do
+
+        const cred = creds.find(c => c.host === host);
+        if (!cred) {
+            log(ns, 'STASIS EXPAND skip ' + host + ' — no password in port 6');
+            continue;
+        }
+
+        // Establish session — stasis link allows connectToSession at any distance
+        const r = ns.dnet.connectToSession(host, cred.password);
+        if (!r.success) {
+            log(ns, 'STASIS EXPAND session failed ' + host + ' code=' + r.code);
+            continue;
+        }
+
+        const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+        if (freeRam < ORCH_RAM_GB) {
+            log(ns, 'STASIS EXPAND skip ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ~' + ORCH_RAM_GB + ')');
+            continue;
+        }
+
+        // SCP from home — orchestrator and lib-utils must always be pulled from the source of truth
+        const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host, 'home');
+        if (!scpOk) {
+            log(ns, 'STASIS EXPAND scp failed to ' + host);
+            continue;
+        }
+
+        const pid = ns.exec(ORCH_SCRIPT, host, 1);
+        if (pid === 0) {
+            log(ns, 'STASIS EXPAND exec failed on ' + host);
+            continue;
+        }
+
+        log(ns, 'STASIS EXPAND propagated orchestrate to ' + host + ' pid=' + pid);
+    }
 }
 
 
