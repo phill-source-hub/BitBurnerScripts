@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.0.1
+ * Version: 1.0.2
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -31,6 +31,8 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.0.2 - Also skip passwordLength===0 servers; darkweb may not be isStationary.
+ *            Add version to tail log via log() (tprint only reaches terminal).
  *   v1.0.1 - Skip isStationary servers (darkweb gateway) to prevent infinite
  *            crack loop on passwordLength=0 nodes.
  *   v1.0.0 - Initial version.
@@ -83,7 +85,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.0.1 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.0.2 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -100,7 +102,8 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, 'dnet-orchestrate starting on ' + ns.getHostname());
+    log(ns, '=== dnet-orchestrate.js v1.0.2 ===');
+    log(ns, 'Starting on ' + ns.getHostname());
 
     // Load any previously cracked creds from port 6 into state map
     loadCredsFromPort(ns);
@@ -165,9 +168,9 @@ async function runCycle(ns, flags) {
             log(ns, 'SKIP ' + host + ' (offline)');
             continue;
         }
-        if (d.isStationary) {
-            log(ns, 'SKIP ' + host + ' (stationary gateway — not crackable)');
-            continue;                                                                // Stationary = fixed story nodes like darkweb; not auth targets
+        if (d.isStationary || d.passwordLength === 0) {
+            log(ns, 'SKIP ' + host + ' (gateway/stationary — not crackable)');
+            continue;                                                                // Stationary or zero-length password = hub nodes like darkweb
         }
 
         // Initialise state entry on first encounter
