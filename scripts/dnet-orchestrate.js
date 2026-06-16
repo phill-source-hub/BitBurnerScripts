@@ -35,6 +35,11 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.6.0 - Fix hub vs ZeroLogon detection: hub = isStationary OR (passwordLength=0
+ *            AND hasSession already granted). ZeroLogon servers have passwordLength=0
+ *            but hasSession=false and must be cracked with authenticate(host,'').
+ *            Previously skipped as hubs — smart_toaster etc. now crackable.
+ *            crackInline now logs modelId and short-circuits on ZeroLogon model.
  *   v1.5.0 - Remove crack worker machinery — darknet hub nodes cannot exec new
  *            scripts onto themselves even with a session. Inline sequential
  *            cracking (crackInline) is the only viable approach from a hub.
@@ -112,7 +117,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.5.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.6.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -129,7 +134,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.5.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.6.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     // Load any previously cracked creds from port 6 into state map
@@ -195,8 +200,10 @@ async function runCycle(ns, flags) {
             log(ns, 'SKIP ' + host + ' (offline)');
             continue;
         }
-        if (d.isStationary || d.passwordLength === 0) {
-            // Hub node (e.g. darkweb) — not crackable, but if session exists propagate deeper
+        // Hub detection: isStationary OR (passwordLength=0 AND auto-session already granted).
+        // ZeroLogon servers also have passwordLength=0 but hasSession=false — they need cracking.
+        const isHub = d.isStationary || (d.passwordLength === 0 && d.hasSession);
+        if (isHub) {
             if (d.hasSession) {
                 await propagateToHub(ns, host);
             } else {
@@ -213,10 +220,6 @@ async function runCycle(ns, flags) {
 
         // --- CRACK ---
         if (!s.password) {
-            if (s.crackPid > 0 && ns.isRunning(s.crackPid)) {
-                log(ns, 'Cracking ' + host + ' — worker pid=' + s.crackPid + ' still running');
-                continue;                                                            // Worker in progress — result arrives next cycle
-            }
             // Crack inline — hub nodes cannot exec worker scripts onto themselves
             const pw = await crackInline(ns, host, d);
             if (pw) {
@@ -306,14 +309,28 @@ function checkCrackResults(ns) {
  * @returns {Promise<string|null>} Password on success, null on failure or non-crackable
  */
 async function crackInline(ns, host, d) {
+    const model = d.modelId || 'unknown';
+
+    // ZeroLogon model (or any passwordLength=0 non-hub): always empty password
+    if (d.modelId === 'ZeroLogon' || d.passwordLength === 0) {
+        log(ns, 'ZeroLogon crack: ' + host + ' (model=' + model + ')');
+        const r = await ns.dnet.authenticate(host, '');
+        if (r.success) {
+            log(ns, 'CRACKED ' + host + ' = "" (ZeroLogon)');
+            return '';
+        }
+        log(ns, 'ZeroLogon FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
     if (d.passwordFormat !== 'numeric' || d.passwordLength > AUTO_CRACK_MAX_LEN) {
-        log(ns, 'MANUAL ' + host + ' — ' + d.passwordFormat + ' len=' + d.passwordLength
-            + '  hint: ' + (d.passwordHint || 'none'));
+        log(ns, 'MANUAL ' + host + ' — model=' + model + ' format=' + d.passwordFormat
+            + ' len=' + d.passwordLength + '  hint: ' + (d.passwordHint || 'none'));
         return null;
     }
 
     const total = Math.pow(10, d.passwordLength);
-    log(ns, 'Cracking inline ' + host + ' (' + total + ' combos, 1 thread)...');
+    log(ns, 'Cracking inline ' + host + ' (model=' + model + ' ' + total + ' combos)...');
 
     for (let i = 0; i < total; i++) {
         const pw = String(i).padStart(d.passwordLength, '0');
