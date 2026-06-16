@@ -35,6 +35,10 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.4.1 - Only one crack worker at a time — worker fills all free RAM so a
+ *            second exec in the same cycle always fails. Defer additional
+ *            servers until the running worker exits. Add freeRam/threads
+ *            diagnostics to exec log line.
  *   v1.4.0 - Exec dnet-crack-worker.js with max threads to scale authenticate()
  *            speed. Cracking is now non-blocking: orchestrator launches worker
  *            and continues processing other servers. Result read from port 7
@@ -119,7 +123,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.4.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.4.1 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -136,7 +140,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.4.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.4.1 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from any previous run
@@ -228,6 +232,14 @@ async function runCycle(ns, flags) {
             if (s.crackPid > 0 && ns.isRunning(s.crackPid)) {
                 log(ns, 'Cracking ' + host + ' — worker pid=' + s.crackPid + ' still running');
                 continue;                                                            // Worker in progress — result arrives next cycle
+            }
+            // Only one crack worker at a time — it fills all free RAM so a second would fail
+            const anyWorkerRunning = [...state.values()].some(
+                st => st.crackPid > 0 && ns.isRunning(st.crackPid)
+            );
+            if (anyWorkerRunning) {
+                log(ns, 'CRACK DEFER ' + host + ' — another worker already running');
+                continue;
             }
             // No active worker — launch one (or log manual-crack note if non-numeric/too long)
             s.crackPid = await launchCrackWorker(ns, host, d);
@@ -328,8 +340,13 @@ async function launchCrackWorker(ns, host, d) {
     }
 
     const myHost  = ns.getHostname();
-    const freeRam = ns.getServerMaxRam(myHost) - ns.getServerUsedRam(myHost);
+    const maxRam  = ns.getServerMaxRam(myHost);
+    const usedRam = ns.getServerUsedRam(myHost);
+    const freeRam = maxRam - usedRam;
     const threads = Math.max(1, Math.floor(freeRam / CRACK_WORKER_RAM_GB));         // Fill free RAM with crack threads; minimum 1
+
+    log(ns, 'Crack worker RAM: max=' + maxRam.toFixed(1) + ' used=' + usedRam.toFixed(1)
+        + ' free=' + freeRam.toFixed(1) + ' → ' + threads + ' threads');
 
     const scpOk = await ns.scp([CRACK_WORKER, LIB_UTILS], myHost, 'home');         // Ensure worker is present on this host
     if (!scpOk) {
@@ -339,7 +356,8 @@ async function launchCrackWorker(ns, host, d) {
 
     const pid = ns.exec(CRACK_WORKER, myHost, threads, host, d.passwordLength);
     if (pid === 0) {
-        log(ns, 'CRACK WORKER EXEC FAILED for ' + host);
+        log(ns, 'CRACK WORKER EXEC FAILED for ' + host
+            + ' (freeRam=' + freeRam.toFixed(1) + ' GB, threads=' + threads + ')');
         return 0;
     }
 
