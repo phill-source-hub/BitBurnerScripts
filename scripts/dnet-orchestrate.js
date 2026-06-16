@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.3.0
+ * Version: 1.4.0
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -15,6 +15,9 @@
  *               password is saved to port 6 and in-memory state is updated.
  *               Longer or non-numeric passwords are logged as needing manual crack.
  *               Heartbleed peek before brute-force surfaces any prior-attempt clues.
+ *               Crack worker (dnet-crack-worker.js) is exec'd with max threads that
+ *               fit in free RAM; more threads = faster per authenticate() call.
+ *               Result arrives on port 7; orchestrator connects via connectToSession.
  *   4. MEMFREE — for cracked servers with blocked RAM: runs memoryReallocation()
  *               inline (same PID = same session). Loops until RAM freed or fail.
  *   5. PHISH  — for cracked servers where dnet-phish.js is not already running:
@@ -32,6 +35,11 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.4.0 - Exec dnet-crack-worker.js with max threads to scale authenticate()
+ *            speed. Cracking is now non-blocking: orchestrator launches worker
+ *            and continues processing other servers. Result read from port 7
+ *            each cycle; connectToSession() restores the orchestrator's session.
+ *            Port 7 cleared on startup; state gains crackPid field.
  *   v1.3.0 - Heartbleed peek before brute-force to surface clues from prior
  *            attempts. BB does not allow concurrent NS calls so Promise.all
  *            parallel cracking is not possible; sequential loop retained.
@@ -71,10 +79,14 @@
  *   1.3  ns.exec            0.6  ns.scp
  *   0.1  ns.isRunning       0.05 ns.getServerMaxRam
  *   0.6  heartbleed         0.05 ns.getServerUsedRam
- *   ~= 4.7 GB total — run from home
+ *   ~= 4.7 GB total — run from home; crack workers add 1.1 GB × threads on same host
  *
  * Dependencies:
  *   import { log, readPort, writePort, clearPort } from '/scripts/lib-utils.js';
+ *
+ * Ports:
+ *   Reads port 7: JSON array of { host, password } from dnet-crack-worker.js.
+ *                 Cleared and rewritten each cycle after draining results.
  */
 
 import { log, readPort, writePort, clearPort } from '/scripts/lib-utils.js';
@@ -91,6 +103,9 @@ const RATE_LIMIT_SLEEP_MS  = 2000;                                              
 const CYCLE_SLEEP_MS       = 200;                                                   // Minimum yield per loop iteration to avoid engine lockup
 const ORCH_SCRIPT          = '/scripts/dnet-orchestrate.js';                        // Self-path for hub propagation
 const ORCH_RAM_GB          = 5;                                                     // Approximate RAM to reserve for orchestrate on hub nodes
+const CRACK_WORKER         = '/scripts/dnet-crack-worker.js';                       // Exec'd with max threads to speed authenticate() calls
+const CRACK_WORKER_RAM_GB  = 1.1;                                                   // Per-thread RAM estimate for dnet-crack-worker.js
+const PORT_CRACK_RESULT    = 7;                                                     // Crack workers write { host, password } results here
 
 
 // --- Server state map (in-memory, survives across mutations) ---
@@ -104,7 +119,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.3.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.4.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -121,8 +136,10 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.3.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.4.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
+
+    clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from any previous run
 
     // Load any previously cracked creds from port 6 into state map
     loadCredsFromPort(ns);
@@ -150,6 +167,9 @@ export async function main(ns) {
  * @returns {Promise<void>}
  */
 async function runCycle(ns, flags) {
+    // Pick up any crack results written by dnet-crack-worker.js since last cycle
+    checkCrackResults(ns);
+
     const dnet     = ns.dnet;
     const visible  = dnet.probe();                                                  // All darknet servers directly connected to this host
 
@@ -198,20 +218,20 @@ async function runCycle(ns, flags) {
         }
 
         // Initialise state entry on first encounter
-        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false });
+        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false, crackPid: 0 });
         const s = state.get(host);
 
         s.stasisLinked = stasisLinked.has(host);                                    // Sync stasis status from live data each cycle
 
         // --- CRACK ---
         if (!s.password) {
-            const cracked = await tryCrack(ns, host, d);
-            if (cracked) {
-                s.password = cracked;
-                saveCredToPort(ns, host, cracked);                                  // Persist to port 6 so dnet-watch can reconnect too
-            } else {
-                continue;                                                            // Cannot proceed without a session
+            if (s.crackPid > 0 && ns.isRunning(s.crackPid)) {
+                log(ns, 'Cracking ' + host + ' — worker pid=' + s.crackPid + ' still running');
+                continue;                                                            // Worker in progress — result arrives next cycle
             }
+            // No active worker — launch one (or log manual-crack note if non-numeric/too long)
+            s.crackPid = await launchCrackWorker(ns, host, d);
+            continue;                                                               // Wait for worker result before proceeding with this host
         }
 
         // Ensure session is active — may have been lost if mutation killed the server
@@ -250,48 +270,82 @@ async function runCycle(ns, flags) {
 // =============================================================================
 
 /**
- * Attempts to crack host by brute-forcing numeric passwords up to AUTO_CRACK_MAX_LEN.
- * Returns the cracked password string on success, or null if unable to auto-crack.
+ * Reads completed crack results from port 7, updates state, and establishes
+ * sessions for newly cracked servers. Called at the top of every runCycle.
+ * @param {NS} ns - Netscript object
+ */
+function checkCrackResults(ns) {
+    const results = readPort(ns, PORT_CRACK_RESULT);
+    if (!Array.isArray(results) || results.length === 0) return;
+
+    for (const { host, password } of results) {
+        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false, crackPid: 0 });
+        const s = state.get(host);
+        s.crackPid = 0;                                                             // Worker has exited regardless of success/failure
+
+        if (!password) {
+            log(ns, 'Crack worker reported failure on ' + host + ' — will relaunch next cycle');
+            continue;
+        }
+        if (s.password) continue;                                                   // Already have it (duplicate result)
+
+        s.password = password;
+        saveCredToPort(ns, host, password);
+        log(ns, 'Crack result: ' + host + ' = ' + password);
+
+        const r = ns.dnet.connectToSession(host, password);                         // Restore orchestrator's own PID-bound session
+        if (r.success) {
+            log(ns, 'Session established: ' + host);
+        } else {
+            log(ns, 'connectToSession failed for ' + host + ' code=' + r.code);
+        }
+    }
+
+    clearPort(ns, PORT_CRACK_RESULT);                                               // Drain processed results; workers will re-populate as needed
+}
+
+/**
+ * Execs dnet-crack-worker.js on the current host with as many threads as fit
+ * in free RAM. More threads = faster per authenticate() call per the API.
+ * Returns the worker PID (> 0) on success, or 0 if the server cannot be auto-cracked.
  * @param {NS} ns - Netscript object
  * @param {string} host - Hostname of the target server
  * @param {object} d - DarknetServerDetails for the target
- * @returns {Promise<string|null>}
+ * @returns {Promise<number>} Worker PID or 0
  */
-async function tryCrack(ns, host, d) {
-    const dnet = ns.dnet;
-
+async function launchCrackWorker(ns, host, d) {
     if (d.passwordFormat !== 'numeric' || d.passwordLength > AUTO_CRACK_MAX_LEN) {
-        // Non-numeric or too long — log for manual follow-up with dnet-crack.js
         log(ns, 'MANUAL ' + host + ' — ' + d.passwordFormat + ' len=' + d.passwordLength
             + '  hint: ' + (d.passwordHint || 'none'));
-        return null;
+        return 0;
     }
 
-    const total = Math.pow(10, d.passwordLength);                                   // Candidate count: 10^length
-    log(ns, 'Cracking ' + host + ' (' + total + ' numeric combos)...');
-
-    // Heartbleed peek before brute-force — surfaces clues from any prior auth attempts
-    const preBleed = await dnet.heartbleed(host, { peek: true });
+    // Heartbleed peek — surface any clues from prior attempts before launching worker
+    const preBleed = await ns.dnet.heartbleed(host, { peek: true });
     if (preBleed.success && preBleed.logs && preBleed.logs.length > 0) {
-        log(ns, 'HB pre-crack ' + host + ' (' + preBleed.logs.length + ' entries):');
+        log(ns, 'HB pre-crack ' + host + ':');
         for (const entry of preBleed.logs) log(ns, '  HB: ' + entry);
     }
 
-    for (let i = 0; i < total; i++) {
-        const pw = String(i).padStart(d.passwordLength, '0');                       // Zero-pad to exact length (e.g. "007")
-        const r  = await dnet.authenticate(host, pw);
-        if (r.success) {
-            log(ns, 'CRACKED ' + host + ' = ' + pw);
-            return pw;
-        }
-        // Back off on rate-limit only — authenticate() already yields to the engine
-        if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') {
-            await ns.sleep(RATE_LIMIT_SLEEP_MS);
-        }
+    const myHost  = ns.getHostname();
+    const freeRam = ns.getServerMaxRam(myHost) - ns.getServerUsedRam(myHost);
+    const threads = Math.max(1, Math.floor(freeRam / CRACK_WORKER_RAM_GB));         // Fill free RAM with crack threads; minimum 1
+
+    const scpOk = await ns.scp([CRACK_WORKER, LIB_UTILS], myHost, 'home');         // Ensure worker is present on this host
+    if (!scpOk) {
+        log(ns, 'CRACK WORKER SCP FAILED for ' + host);
+        return 0;
     }
 
-    log(ns, 'CRACK FAILED ' + host + ' — exhausted ' + total + ' combos');
-    return null;
+    const pid = ns.exec(CRACK_WORKER, myHost, threads, host, d.passwordLength);
+    if (pid === 0) {
+        log(ns, 'CRACK WORKER EXEC FAILED for ' + host);
+        return 0;
+    }
+
+    log(ns, 'Crack worker launched: ' + host + ' — ' + threads + ' threads (freeRam='
+        + freeRam.toFixed(1) + ' GB) pid=' + pid);
+    return pid;
 }
 
 
@@ -493,7 +547,7 @@ function loadCredsFromPort(ns) {
     const creds = readPort(ns, PORT_DNET_CREDS);
     if (!Array.isArray(creds)) return;
     for (const { host, password } of creds) {
-        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false });
+        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false, crackPid: 0 });
         state.get(host).password = password;
     }
     log(ns, 'Loaded ' + creds.length + ' known password(s) from port ' + PORT_DNET_CREDS);

@@ -1,6 +1,6 @@
 /**
  * installer.js
- * Version: 1.0.0
+ * Version: 1.2.0
  *
  * Downloads all PhlanxOS scripts from GitHub to /scripts/.
  *
@@ -18,6 +18,7 @@
  *     run /scripts/bootstrap.js    <- starts everything for current tier
  *
  * Changelog:
+ *   v1.2.0 - Added dnet-crack-worker.js.
  *   v1.1.0 - Added darknet scripts: dnet-scan, dnet-crack, dnet-watch, dnet-phish,
  *            dnet-memfree, dnet-orchestrate, dnet-stasis-set.
  *   v1.0.0 - Initial version
@@ -64,6 +65,7 @@ const SCRIPTS = [
     'dnet-phish.js',
     'dnet-memfree.js',
     'dnet-orchestrate.js',
+    'dnet-crack-worker.js',
     'dnet-stasis-set.js',
     'bootstrap.js',
     'installer.js',
