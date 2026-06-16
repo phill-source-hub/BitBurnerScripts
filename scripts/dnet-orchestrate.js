@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.1.1
+ * Version: 1.1.2
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -31,6 +31,8 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.1.2 - Remove per-attempt sleep from tryCrack; authenticate() yields to
+ *            engine itself. Only sleep on TIMEOUT/RATE_LIMITED responses.
  *   v1.1.1 - All scp() calls now pass 'home' as source — orchestrate may run on
  *            a darknet relay (darkweb) that doesn't have phish/stasis scripts.
  *   v1.1.0 - Hub propagation: stationary/passwordLength=0 nodes with a session
@@ -92,7 +94,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.1.1 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.1.2 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -109,7 +111,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.1.1 ===');
+    log(ns, '=== dnet-orchestrate.js v1.1.2 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     // Load any previously cracked creds from port 6 into state map
@@ -265,11 +267,9 @@ async function tryCrack(ns, host, d) {
             log(ns, 'CRACKED ' + host + ' = ' + pw);
             return pw;
         }
-        // Back off on rate-limit to avoid triggering longer lockouts
+        // Back off on rate-limit only — authenticate() already yields to the engine
         if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') {
             await ns.sleep(RATE_LIMIT_SLEEP_MS);
-        } else {
-            await ns.sleep(CYCLE_SLEEP_MS);                                         // Yield to engine on every auth attempt (rule 12)
         }
     }
 
