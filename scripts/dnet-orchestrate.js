@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.2.1
+ * Version: 1.3.0
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -14,6 +14,8 @@
  *               brute-forces all combinations via authenticate(). On success the
  *               password is saved to port 6 and in-memory state is updated.
  *               Longer or non-numeric passwords are logged as needing manual crack.
+ *               Heartbleed peek before brute-force surfaces any prior-attempt clues.
+ *               Passwords tried in parallel batches (CRACK_BATCH_SIZE) for ~10x speed.
  *   4. MEMFREE — for cracked servers with blocked RAM: runs memoryReallocation()
  *               inline (same PID = same session). Loops until RAM freed or fail.
  *   5. PHISH  — for cracked servers where dnet-phish.js is not already running:
@@ -31,6 +33,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.3.0 - Parallel batch cracking via Promise.all (CRACK_BATCH_SIZE=10) for
+ *            ~10x speedup over sequential. Heartbleed peek before brute-force to
+ *            surface clues from prior attempts. Retry batch on RATE_LIMITED.
  *   v1.2.1 - Separate stasis and propagation across cycles — stasis worker uses
  *            12 GB so orchestrator (5 GB) must wait until next cycle for RAM.
  *            Return early after stasis exec; propagate on next mutation cycle.
@@ -66,8 +71,8 @@
  *   0.05 connectToSession   1.0  memoryReallocation
  *   1.3  ns.exec            0.6  ns.scp
  *   0.1  ns.isRunning       0.05 ns.getServerMaxRam
- *   0.05 ns.getServerUsedRam
- *   ~= 4.1 GB total — run from home
+ *   0.6  heartbleed         0.05 ns.getServerUsedRam
+ *   ~= 4.7 GB total — run from home
  *
  * Dependencies:
  *   import { log, readPort, writePort, clearPort } from '/scripts/lib-utils.js';
@@ -85,6 +90,7 @@ const PHISH_RAM_GB       = 4;                                                   
 const AUTO_CRACK_MAX_LEN = 4;                                                       // Only brute-force numeric passwords up to this length (10K max)
 const RATE_LIMIT_SLEEP_MS  = 2000;                                                  // Pause after rate-limit or timeout response from authenticate
 const CYCLE_SLEEP_MS       = 200;                                                   // Minimum yield per loop iteration to avoid engine lockup
+const CRACK_BATCH_SIZE     = 10;                                                    // Concurrent authenticate() calls per round; ~10x speedup over sequential
 const ORCH_SCRIPT          = '/scripts/dnet-orchestrate.js';                        // Self-path for hub propagation
 const ORCH_RAM_GB          = 5;                                                     // Approximate RAM to reserve for orchestrate on hub nodes
 
@@ -100,7 +106,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.2.1 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.3.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -117,7 +123,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.2.1 ===');
+    log(ns, '=== dnet-orchestrate.js v1.3.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     // Load any previously cracked creds from port 6 into state map
@@ -264,18 +270,43 @@ async function tryCrack(ns, host, d) {
     }
 
     const total = Math.pow(10, d.passwordLength);                                   // Candidate count: 10^length
-    log(ns, 'Cracking ' + host + ' (' + total + ' numeric combos)...');
+    log(ns, 'Cracking ' + host + ' (' + total + ' combos, batch=' + CRACK_BATCH_SIZE + ')...');
 
-    for (let i = 0; i < total; i++) {
-        const pw = String(i).padStart(d.passwordLength, '0');                       // Zero-pad to exact length (e.g. "007")
-        const r  = await dnet.authenticate(host, pw);
-        if (r.success) {
-            log(ns, 'CRACKED ' + host + ' = ' + pw);
-            return pw;
+    // Heartbleed peek before brute-force — surfaces clues from any prior auth attempts
+    const preBleed = await dnet.heartbleed(host, { peek: true });
+    if (preBleed.success && preBleed.logs && preBleed.logs.length > 0) {
+        log(ns, 'HB pre-crack ' + host + ' (' + preBleed.logs.length + ' log entries):');
+        for (const entry of preBleed.logs) log(ns, '  HB: ' + entry);
+    }
+
+    let i = 0;
+    while (i < total) {
+        const batchSize = Math.min(CRACK_BATCH_SIZE, total - i);
+        const pws   = [];
+        const batch = [];
+        for (let j = 0; j < batchSize; j++) {
+            const pw = String(i + j).padStart(d.passwordLength, '0');               // Zero-pad to exact length (e.g. "007")
+            pws.push(pw);
+            batch.push(dnet.authenticate(host, pw));
         }
-        // Back off on rate-limit only — authenticate() already yields to the engine
-        if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') {
-            await ns.sleep(RATE_LIMIT_SLEEP_MS);
+
+        const results = await Promise.all(batch);                                   // Fire all CRACK_BATCH_SIZE attempts concurrently
+
+        let rateLimited = false;
+        for (let k = 0; k < results.length; k++) {
+            if (results[k].success) {
+                log(ns, 'CRACKED ' + host + ' = ' + pws[k]);
+                return pws[k];
+            }
+            if (results[k].code === 'TIMEOUT' || results[k].code === 'RATE_LIMITED') {
+                rateLimited = true;
+            }
+        }
+
+        if (rateLimited) {
+            await ns.sleep(RATE_LIMIT_SLEEP_MS);                                    // Back off then retry same batch
+        } else {
+            i += batchSize;
         }
     }
 
