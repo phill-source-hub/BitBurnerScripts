@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.2.0
+ * Version: 1.2.1
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -31,6 +31,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.2.1 - Separate stasis and propagation across cycles — stasis worker uses
+ *            12 GB so orchestrator (5 GB) must wait until next cycle for RAM.
+ *            Return early after stasis exec; propagate on next mutation cycle.
  *   v1.2.0 - Apply stasis to hub nodes before propagating orchestrator.
  *            Mutations restart hub servers, killing mid-crack orchestrators.
  *            Hub stability takes priority over cracked-server stasis slots.
@@ -97,7 +100,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.2.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.2.1 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -114,7 +117,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.2.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.2.1 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     // Load any previously cracked creds from port 6 into state map
@@ -406,38 +409,41 @@ async function applyStasis(ns, host) {
  * @returns {Promise<void>}
  */
 async function propagateToHub(ns, host) {
-    // Apply stasis to hub before propagating — mutations can restart hub servers,
-    // killing the orchestrator mid-crack. Stasis prevents offline/move.
-    // Hub stability is worth more than reserving the slot for cracked servers.
     const stasisLinked = new Set(ns.dnet.getStasisLinkedServers());
+    const slotsLimit   = ns.dnet.getStasisLinkLimit();
+
+    // Step 1: ensure hub has a stasis link before propagating the orchestrator.
+    // We exec the stasis worker and return early this cycle — the worker needs
+    // 12 GB and its RAM must be freed before the orchestrator (5 GB) can start.
+    // On the next cycle, stasis should be confirmed and RAM freed.
     if (!stasisLinked.has(host)) {
-        const slotsUsed  = stasisLinked.size;
-        const slotsLimit = ns.dnet.getStasisLinkLimit();
-        if (slotsUsed < slotsLimit) {
-            const freeForStasis = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
-            if (freeForStasis >= STASIS_RAM_GB) {
-                const stasisScpOk = await ns.scp(STASIS_SCRIPT, host, 'home');
-                if (stasisScpOk) {
-                    const stasisPid = ns.exec(STASIS_SCRIPT, host, 1);
-                    if (stasisPid > 0) {
-                        log(ns, 'HUB stasis applied to ' + host + ' pid=' + stasisPid);
-                    } else {
-                        log(ns, 'HUB stasis exec failed on ' + host);
+        if (stasisLinked.size >= slotsLimit) {
+            log(ns, 'HUB stasis skip ' + host + ' — no stasis slots available');
+            // Fall through to propagate without stasis — better than nothing
+        } else {
+            const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+            if (freeRam < STASIS_RAM_GB) {
+                log(ns, 'HUB stasis skip ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ' + STASIS_RAM_GB + ' for worker)');
+                // Fall through to try propagating anyway with available RAM
+            } else {
+                const scpOk = await ns.scp(STASIS_SCRIPT, host, 'home');
+                if (scpOk) {
+                    const pid = ns.exec(STASIS_SCRIPT, host, 1);
+                    if (pid > 0) {
+                        log(ns, 'HUB stasis worker exec on ' + host + ' pid=' + pid + ' — waiting next cycle to propagate');
+                        return;                                                      // Return now; stasis worker needs its 12 GB, and the next cycle will propagate orchestrate once RAM is freed
                     }
+                    log(ns, 'HUB stasis exec failed on ' + host);
                 } else {
                     log(ns, 'HUB stasis scp failed to ' + host);
                 }
-            } else {
-                log(ns, 'HUB stasis skip ' + host + ' — insufficient RAM for stasis worker');
             }
-        } else {
-            log(ns, 'HUB stasis skip ' + host + ' — no stasis slots available');
         }
     }
 
-    // Check if orchestrate is already running on this hub — avoid duplicates
+    // Step 2: propagate orchestrator — stasis is either confirmed or unavailable
     if (ns.isRunning(ORCH_SCRIPT, host)) {
-        return;                                                                      // Already propagated — nothing to do
+        return;                                                                      // Already running — nothing to do
     }
 
     const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
@@ -446,7 +452,6 @@ async function propagateToHub(ns, host) {
         return;
     }
 
-    // Pull orchestrate + lib-utils from home — hub has neither file
     const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host, 'home');
     if (!scpOk) {
         log(ns, 'HUB SCP FAILED ' + host);
