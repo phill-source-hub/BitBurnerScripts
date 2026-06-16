@@ -18,6 +18,8 @@
  *     run /scripts/bootstrap.js    <- starts everything for current tier
  *
  * Changelog:
+ *   v1.1.0 - Added darknet scripts: dnet-scan, dnet-crack, dnet-watch, dnet-phish,
+ *            dnet-memfree, dnet-orchestrate, dnet-stasis-set.
  *   v1.0.0 - Initial version
  *
  * Flags:
@@ -56,6 +58,13 @@ const SCRIPTS = [
     'grafting.js',
     'go.js',
     'stanek.js',
+    'dnet-scan.js',
+    'dnet-crack.js',
+    'dnet-watch.js',
+    'dnet-phish.js',
+    'dnet-memfree.js',
+    'dnet-orchestrate.js',
+    'dnet-stasis-set.js',
     'bootstrap.js',
     'installer.js',
 ];
@@ -72,7 +81,7 @@ export async function main(ns) {
     const flags = ns.flags([['help', false]]);
 
     if (flags.help) {
-        ns.tprint('=== installer.js v1.0.0 ===');
+        ns.tprint('=== installer.js v1.1.0 ===');
         ns.tprint('Purpose: Downloads all PhlanxOS scripts from GitHub to /scripts/.');
         ns.tprint('         Re-run at any time to update all scripts to latest version.');
         ns.tprint('Usage:   run /scripts/installer.js');
@@ -82,7 +91,7 @@ export async function main(ns) {
         return;
     }
 
-    ns.tprint('=== installer.js v1.0.0 ===');
+    ns.tprint('=== installer.js v1.1.0 ===');
     ns.tprint('Downloading ' + SCRIPTS.length + ' scripts from GitHub...');
     ns.disableLog('ALL');
 

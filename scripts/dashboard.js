@@ -25,6 +25,8 @@
  *     Bladeburner — rank, current action
  *
  * Changelog:
+ *   v1.8.0 - Darknet section: visible/cracked/stasis/instability from dnet API + port 6.
+ *            Added Dnet Orch + Dnet Watch to MANAGED scripts list.
  *   v1.7.0 - Stocks section: realised/unrealised/total P&L from port 4 (stocks.js).
  *   v1.6.0 - Faction section (current faction, rep, favour via singularity API).
  *            LOG button per active script: queues tail open via cmdQueue.
@@ -57,7 +59,7 @@
  * RAM: ~4.5 GB
  */
 
-const VERSION    = '1.7.0';
+const VERSION    = '1.8.0';
 const POLL_MS    = 2000;
 const STALE_MS   = 2 * 60 * 1000;
 const TIER_MIN   = 2;
@@ -70,22 +72,24 @@ const TAIL_H      = 820;
 const TAIL_MARGIN = 10;
 
 const MANAGED = [
-    { label: 'Orchestrate',   script: 'scripts/orchestrate.js',     args: [] },
-    { label: 'Auto-Root',     script: 'scripts/auto-root.js',       args: ['--watch'] },
-    { label: 'Buy Servers',   script: 'scripts/buy-servers.js',     args: [] },
-    { label: 'Upg Servers',   script: 'scripts/upgrade-servers.js', args: [] },
-    { label: 'Hacknet',       script: 'scripts/hacknet-manager.js', args: [] },
-    { label: 'Share Mgr',     script: 'scripts/share-manager.js',   args: [] },
-    { label: 'Contracts',     script: 'scripts/contracts.js',       args: [] },
-    { label: 'Singularity',   script: 'scripts/singularity.js',     args: [] },
-    { label: 'Stocks',        script: 'scripts/stocks.js',          args: [] },
-    { label: 'Gang',          script: 'scripts/gang.js',            args: [] },
-    { label: 'Sleeve',        script: 'scripts/sleeve.js',          args: [] },
-    { label: 'Bladeburner',   script: 'scripts/bladeburner.js',     args: [] },
-    { label: 'Corporation',   script: 'scripts/corporation.js',     args: [] },
-    { label: 'Grafting',      script: 'scripts/grafting.js',        args: [] },
-    { label: 'Go',            script: 'scripts/go.js',              args: [] },
-    { label: 'Stanek',        script: 'scripts/stanek.js',          args: [] },
+    { label: 'Orchestrate',   script: 'scripts/orchestrate.js',       args: [] },
+    { label: 'Auto-Root',     script: 'scripts/auto-root.js',         args: ['--watch'] },
+    { label: 'Buy Servers',   script: 'scripts/buy-servers.js',       args: [] },
+    { label: 'Upg Servers',   script: 'scripts/upgrade-servers.js',   args: [] },
+    { label: 'Hacknet',       script: 'scripts/hacknet-manager.js',   args: [] },
+    { label: 'Share Mgr',     script: 'scripts/share-manager.js',     args: [] },
+    { label: 'Contracts',     script: 'scripts/contracts.js',         args: [] },
+    { label: 'Singularity',   script: 'scripts/singularity.js',       args: [] },
+    { label: 'Stocks',        script: 'scripts/stocks.js',            args: [] },
+    { label: 'Gang',          script: 'scripts/gang.js',              args: [] },
+    { label: 'Sleeve',        script: 'scripts/sleeve.js',            args: [] },
+    { label: 'Bladeburner',   script: 'scripts/bladeburner.js',       args: [] },
+    { label: 'Corporation',   script: 'scripts/corporation.js',       args: [] },
+    { label: 'Grafting',      script: 'scripts/grafting.js',          args: [] },
+    { label: 'Go',            script: 'scripts/go.js',                args: [] },
+    { label: 'Stanek',        script: 'scripts/stanek.js',            args: [] },
+    { label: 'Dnet Orch',     script: 'scripts/dnet-orchestrate.js',  args: [] },
+    { label: 'Dnet Watch',    script: 'scripts/dnet-watch.js',        args: [] },
 ];
 
 const C = {
@@ -139,6 +143,7 @@ const INIT_DATA = {
     farmMax: 0, farmUsed: 0, farmCount: 0, farmLimit: 0,
     targets: {}, cycleStart: 0, corpData: null, bbData: null,
     now: Date.now(), income: [0, 0], factionData: null, stockData: null,
+    dnetData: null,
 };
 
 // Single shared reference; main() mutates this each poll cycle.
@@ -230,6 +235,26 @@ function collectData(ns) {
         factionData = { name: fac, rep, favour };
     }
 
+    // Darknet stats — probe() + instability + stasis + port 6 cracked count
+    let dnetData = null;
+    try {
+        const dnet        = ns.dnet;
+        const visible     = dnet.probe().length;
+        const instab      = dnet.getDarknetInstability();
+        const stasisUsed  = dnet.getStasisLinkedServers().length;
+        const stasisLimit = dnet.getStasisLinkLimit();
+        const p6Raw       = ns.peek(6);
+        const crackedList = (p6Raw === 'NULL PORT DATA') ? [] : JSON.parse(p6Raw);
+        dnetData = {
+            visible,
+            cracked:      crackedList.length,
+            stasisUsed,
+            stasisLimit,
+            instability:  instab.authenticationDurationMultiplier,
+            timeoutChance: instab.authenticationTimeoutChance,
+        };
+    } catch (_) {}
+
     // Mutate sharedData in place so React's getData() always reads current values
     sharedData = {
         player, homeMax, homeUsed, running,
@@ -237,6 +262,7 @@ function collectData(ns) {
         farmMax, farmUsed, farmCount, farmLimit,
         targets, cycleStart, corpData, bbData,
         now: Date.now(), income, factionData, stockData,
+        dnetData,
     };
 }
 
@@ -280,6 +306,7 @@ function Dashboard(props) {
         renderHacknet(d),
         renderStocks(d),
         renderShare(d),
+        d.dnetData ? renderDarknet(d)     : null,
         d.corpData ? renderCorp(d)        : null,
         d.bbData   ? renderBladeburner(d) : null,
         renderFooter(),
@@ -601,6 +628,30 @@ function renderStocks(d) {
                 e('span', { key: 'v', style: { color: (sd.realised + sd.unrealised) >= 0 ? C.green : C.red } },
                     ((sd.realised + sd.unrealised) >= 0 ? '+' : '') + fmtMoney(sd.realised + sd.unrealised, 2)),
             ]),
+        ]),
+    ]);
+}
+
+
+// =============================================================================
+// Darknet
+// =============================================================================
+
+function renderDarknet(d) {
+    var dn = d.dnetData;
+    if (!dn) return null;
+
+    var instabCol = dn.instability > 2.0 ? C.red : dn.instability > 1.2 ? C.yellow : C.green;
+    var stasisCol = dn.stasisUsed >= dn.stasisLimit ? C.yellow : C.cyan;
+
+    return e('div', { key: 'dnet', style: panel() }, [
+        sectionHead('DARKNET'),
+        e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
+            statChip('visible',  dn.visible,                                               C.blue),
+            statChip('cracked',  dn.cracked,                                               C.green),
+            statChip('stasis',   dn.stasisUsed + '/' + dn.stasisLimit,                    stasisCol),
+            statChip('instab',   dn.instability.toFixed(2) + 'x',                         instabCol),
+            statChip('timeout',  (dn.timeoutChance * 100).toFixed(1) + '%',               instabCol),
         ]),
     ]);
 }
