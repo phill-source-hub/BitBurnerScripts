@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.0.2
+ * Version: 1.1.0
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -31,6 +31,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.1.0 - Hub propagation: stationary/passwordLength=0 nodes with a session
+ *            (e.g. darkweb) now receive a copy of the orchestrator via exec(),
+ *            allowing it to probe and crack the next layer of servers.
  *   v1.0.2 - Also skip passwordLength===0 servers; darkweb may not be isStationary.
  *            Add version to tail log via log() (tprint only reaches terminal).
  *   v1.0.1 - Skip isStationary servers (darkweb gateway) to prevent infinite
@@ -70,8 +73,10 @@ const LIB_UTILS          = '/scripts/lib-utils.js';                             
 const STASIS_RAM_GB      = 12;                                                      // GB required on target to run dnet-stasis-set.js
 const PHISH_RAM_GB       = 4;                                                       // GB per thread for dnet-phish.js (2 phish + 2 openCache)
 const AUTO_CRACK_MAX_LEN = 4;                                                       // Only brute-force numeric passwords up to this length (10K max)
-const RATE_LIMIT_SLEEP_MS = 2000;                                                   // Pause after rate-limit or timeout response from authenticate
-const CYCLE_SLEEP_MS     = 200;                                                     // Minimum yield per loop iteration to avoid engine lockup
+const RATE_LIMIT_SLEEP_MS  = 2000;                                                  // Pause after rate-limit or timeout response from authenticate
+const CYCLE_SLEEP_MS       = 200;                                                   // Minimum yield per loop iteration to avoid engine lockup
+const ORCH_SCRIPT          = '/scripts/dnet-orchestrate.js';                        // Self-path for hub propagation
+const ORCH_RAM_GB          = 5;                                                     // Approximate RAM to reserve for orchestrate on hub nodes
 
 
 // --- Server state map (in-memory, survives across mutations) ---
@@ -85,7 +90,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.0.2 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.1.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -102,7 +107,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.0.2 ===');
+    log(ns, '=== dnet-orchestrate.js v1.1.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     // Load any previously cracked creds from port 6 into state map
@@ -169,8 +174,13 @@ async function runCycle(ns, flags) {
             continue;
         }
         if (d.isStationary || d.passwordLength === 0) {
-            log(ns, 'SKIP ' + host + ' (gateway/stationary — not crackable)');
-            continue;                                                                // Stationary or zero-length password = hub nodes like darkweb
+            // Hub node (e.g. darkweb) — not crackable, but if session exists propagate deeper
+            if (d.hasSession) {
+                await propagateToHub(ns, host);
+            } else {
+                log(ns, 'SKIP ' + host + ' (hub, no session yet)');
+            }
+            continue;
         }
 
         // Initialise state entry on first encounter
@@ -374,6 +384,48 @@ async function applyStasis(ns, host) {
 
     log(ns, 'STASIS worker launched on ' + host + ' pid=' + pid);
     return true;
+}
+
+
+// =============================================================================
+// Hub propagation
+// =============================================================================
+
+/**
+ * Deploys a copy of the orchestrator onto a hub node (e.g. darkweb) so it can
+ * probe and crack the next layer of servers. Hub nodes have sessions but no
+ * password — we cannot crack them, but we can exec onto them.
+ * Skips deployment if orchestrate is already running on the hub.
+ * @param {NS} ns - Netscript object
+ * @param {string} host - Hostname of the hub server
+ * @returns {Promise<void>}
+ */
+async function propagateToHub(ns, host) {
+    // Check if orchestrate is already running on this hub — avoid duplicates
+    if (ns.isRunning(ORCH_SCRIPT, host)) {
+        return;                                                                      // Already propagated — nothing to do
+    }
+
+    const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+    if (freeRam < ORCH_RAM_GB) {
+        log(ns, 'HUB SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ~' + ORCH_RAM_GB + ')');
+        return;
+    }
+
+    // SCP orchestrate + its dependency to the hub
+    const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host);
+    if (!scpOk) {
+        log(ns, 'HUB SCP FAILED ' + host);
+        return;
+    }
+
+    const pid = ns.exec(ORCH_SCRIPT, host, 1);
+    if (pid === 0) {
+        log(ns, 'HUB EXEC FAILED ' + host);
+        return;
+    }
+
+    log(ns, 'HUB propagated orchestrate to ' + host + ' pid=' + pid);
 }
 
 
