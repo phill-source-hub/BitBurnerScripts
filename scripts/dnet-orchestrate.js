@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.0.0
+ * Version: 1.0.1
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -31,6 +31,8 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.0.1 - Skip isStationary servers (darkweb gateway) to prevent infinite
+ *            crack loop on passwordLength=0 nodes.
  *   v1.0.0 - Initial version.
  *
  * Flags:
@@ -81,7 +83,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.0.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.0.1 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -162,6 +164,10 @@ async function runCycle(ns, flags) {
         if (!d.isOnline) {
             log(ns, 'SKIP ' + host + ' (offline)');
             continue;
+        }
+        if (d.isStationary) {
+            log(ns, 'SKIP ' + host + ' (stationary gateway — not crackable)');
+            continue;                                                                // Stationary = fixed story nodes like darkweb; not auth targets
         }
 
         // Initialise state entry on first encounter
