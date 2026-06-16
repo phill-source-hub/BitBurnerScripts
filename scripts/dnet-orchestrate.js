@@ -35,6 +35,8 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.4.3 - Guard hub self-session with isDarknetServer() — home instance crashed
+ *            calling getServerDetails('home') which is not a darknet server.
  *   v1.4.2 - Fallback to inline sequential cracking when worker exec fails (no
  *            exec session on hub). Attempt hub self-session on startup via
  *            connectToSession(host, '') — if OK, workers can exec; if not, inline
@@ -127,7 +129,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.4.2 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.4.3 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -144,7 +146,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.4.2 ===');
+    log(ns, '=== dnet-orchestrate.js v1.4.3 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from any previous run
@@ -152,11 +154,13 @@ export async function main(ns) {
     // If running on a darknet hub, attempt a self-session so exec() onto this host works.
     // Hub nodes (passwordLength=0) auto-grant sessions — try connectToSession with blank password.
     // This enables threading via crack workers; falls back to inline cracking if it fails.
-    const selfHost    = ns.getHostname();
-    const selfDetails = ns.dnet.getServerDetails(selfHost);
-    if (selfDetails && (selfDetails.isStationary || selfDetails.passwordLength === 0)) {
-        const r = ns.dnet.connectToSession(selfHost, '');
-        log(ns, 'Hub self-session on ' + selfHost + ': ' + (r.success ? 'OK — workers can exec here' : 'FAILED code=' + r.code + ' — will crack inline'));
+    const selfHost = ns.getHostname();
+    if (ns.dnet.isDarknetServer(selfHost)) {
+        const selfDetails = ns.dnet.getServerDetails(selfHost);
+        if (selfDetails.isStationary || selfDetails.passwordLength === 0) {
+            const r = ns.dnet.connectToSession(selfHost, '');
+            log(ns, 'Hub self-session on ' + selfHost + ': ' + (r.success ? 'OK — workers can exec here' : 'FAILED code=' + r.code + ' — will crack inline'));
+        }
     }
 
     // Load any previously cracked creds from port 6 into state map
