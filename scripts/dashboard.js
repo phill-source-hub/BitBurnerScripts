@@ -25,6 +25,9 @@
  *     Bladeburner — rank, current action
  *
  * Changelog:
+ *   v1.9.0 - Darknet section shows scripts running on darkweb via ns.ps('darkweb').
+ *            LOG/STOP buttons work by PID-independent script name + host routing.
+ *            cmd queue drain extended to support non-home host field.
  *   v1.8.0 - Darknet section: visible/cracked/stasis/instability from dnet API + port 6.
  *            Added Dnet Orch + Dnet Watch to MANAGED scripts list.
  *   v1.7.0 - Stocks section: realised/unrealised/total P&L from port 4 (stocks.js).
@@ -59,7 +62,7 @@
  * RAM: ~4.5 GB
  */
 
-const VERSION    = '1.8.0';
+const VERSION    = '1.9.0';
 const POLL_MS    = 2000;
 const STALE_MS   = 2 * 60 * 1000;
 const TIER_MIN   = 2;
@@ -143,7 +146,7 @@ const INIT_DATA = {
     farmMax: 0, farmUsed: 0, farmCount: 0, farmLimit: 0,
     targets: {}, cycleStart: 0, corpData: null, bbData: null,
     now: Date.now(), income: [0, 0], factionData: null, stockData: null,
-    dnetData: null,
+    dnetData: null, darkwebProcs: [],
 };
 
 // Single shared reference; main() mutates this each poll cycle.
@@ -235,6 +238,10 @@ function collectData(ns) {
         factionData = { name: fac, rep, favour };
     }
 
+    // Scripts running on darkweb — ps() by server, not home; PID changes dynamically
+    let darkwebProcs = [];
+    try { darkwebProcs = ns.ps('darkweb'); } catch (_) {}
+
     // Darknet stats — probe() + instability + stasis + port 6 cracked count
     let dnetData = null;
     try {
@@ -262,7 +269,7 @@ function collectData(ns) {
         farmMax, farmUsed, farmCount, farmLimit,
         targets, cycleStart, corpData, bbData,
         now: Date.now(), income, factionData, stockData,
-        dnetData,
+        dnetData, darkwebProcs,
     };
 }
 
@@ -644,16 +651,34 @@ function renderDarknet(d) {
     var instabCol = dn.instability > 2.0 ? C.red : dn.instability > 1.2 ? C.yellow : C.green;
     var stasisCol = dn.stasisUsed >= dn.stasisLimit ? C.yellow : C.cyan;
 
+    // Rows for scripts running on darkweb — PID-dynamic, found via ps()
+    var procRows = (d.darkwebProcs || []).map(function(proc) {
+        var shortName = proc.filename.replace('/scripts/', '');
+        var onLog  = function() { cmdQueue.push({ action: 'tail', script: proc.filename, host: 'darkweb' }); };
+        var onStop = function() { cmdQueue.push({ action: 'kill', script: proc.filename, host: 'darkweb' }); };
+        return e('div', {
+            key: proc.pid,
+            style: { display: 'flex', alignItems: 'center', gap: '4px', padding: '2px 0', fontSize: '11px' },
+        }, [
+            e('span', { key: 'dot',  style: { color: C.green, fontSize: '10px' } }, '●'),
+            e('span', { key: 'host', style: { color: C.purple, minWidth: '60px' } }, 'darkweb'),
+            e('span', { key: 'name', style: { flex: 1, color: C.text } }, shortName),
+            e('span', { key: 'pid',  style: { color: C.dim, fontSize: '10px', marginRight: '4px' } }, 'pid:' + proc.pid),
+            e('button', { key: 'log',  onClick: onLog,  style: Object.assign({}, btnStyle(C.dim), { marginRight: '3px' }) }, 'LOG'),
+            e('button', { key: 'stop', onClick: onStop, style: btnStyle(C.red) }, 'STOP'),
+        ]);
+    });
+
     return e('div', { key: 'dnet', style: panel() }, [
         sectionHead('DARKNET'),
-        e('div', { key: 'row', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap' } }, [
+        e('div', { key: 'stats', style: { display: 'flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap', marginBottom: procRows.length ? '5px' : '0' } }, [
             statChip('visible',  dn.visible,                                               C.blue),
             statChip('cracked',  dn.cracked,                                               C.green),
             statChip('stasis',   dn.stasisUsed + '/' + dn.stasisLimit,                    stasisCol),
             statChip('instab',   dn.instability.toFixed(2) + 'x',                         instabCol),
             statChip('timeout',  (dn.timeoutChance * 100).toFixed(1) + '%',               instabCol),
         ]),
-    ]);
+    ].concat(procRows));
 }
 
 
@@ -779,9 +804,10 @@ export async function main(ns) {
         while (cmdQueue.length > 0) {
             const cmd = cmdQueue.shift();
             try {
-                if (cmd.action === 'kill') ns.scriptKill(cmd.script, 'home');
+                var cmdHost = cmd.host || 'home';
+                if (cmd.action === 'kill') ns.scriptKill(cmd.script, cmdHost);
                 if (cmd.action === 'run')  ns.exec(cmd.script, 'home', 1, ...(cmd.args || []));
-                if (cmd.action === 'tail') ns.ui.openTail(cmd.script, 'home');
+                if (cmd.action === 'tail') ns.ui.openTail(cmd.script, cmdHost);
             } catch (_) {}
         }
         try { collectData(ns); } catch (_) {}
