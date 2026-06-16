@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.1.0
+ * Version: 1.1.1
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -31,6 +31,8 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.1.1 - All scp() calls now pass 'home' as source — orchestrate may run on
+ *            a darknet relay (darkweb) that doesn't have phish/stasis scripts.
  *   v1.1.0 - Hub propagation: stationary/passwordLength=0 nodes with a session
  *            (e.g. darkweb) now receive a copy of the orchestrator via exec(),
  *            allowing it to probe and crack the next layer of servers.
@@ -90,7 +92,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.1.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.1.1 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -107,7 +109,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.1.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.1.1 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     // Load any previously cracked creds from port 6 into state map
@@ -334,8 +336,8 @@ async function ensurePhish(ns, host, prevPid) {
         return 0;
     }
 
-    // Copy required files to target — phish needs lib-utils for log()
-    const scpOk = await ns.scp([PHISH_SCRIPT, LIB_UTILS], host);
+    // Always pull from home — orchestrate may be running on a darknet relay (e.g. darkweb)
+    const scpOk = await ns.scp([PHISH_SCRIPT, LIB_UTILS], host, 'home');
     if (!scpOk) {
         log(ns, 'PHISH SCP FAILED ' + host);
         return 0;
@@ -370,7 +372,7 @@ async function applyStasis(ns, host) {
         return false;
     }
 
-    const scpOk = await ns.scp(STASIS_SCRIPT, host);
+    const scpOk = await ns.scp(STASIS_SCRIPT, host, 'home');                       // Always pull from home — may be running on a relay
     if (!scpOk) {
         log(ns, 'STASIS SCP FAILED ' + host);
         return false;
@@ -412,8 +414,8 @@ async function propagateToHub(ns, host) {
         return;
     }
 
-    // SCP orchestrate + its dependency to the hub
-    const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host);
+    // Pull orchestrate + lib-utils from home — hub has neither file
+    const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host, 'home');
     if (!scpOk) {
         log(ns, 'HUB SCP FAILED ' + host);
         return;
