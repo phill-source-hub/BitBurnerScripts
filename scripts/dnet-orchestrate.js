@@ -35,21 +35,11 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
- *   v1.4.3 - Guard hub self-session with isDarknetServer() — home instance crashed
- *            calling getServerDetails('home') which is not a darknet server.
- *   v1.4.2 - Fallback to inline sequential cracking when worker exec fails (no
- *            exec session on hub). Attempt hub self-session on startup via
- *            connectToSession(host, '') — if OK, workers can exec; if not, inline
- *            takes over transparently. Removes duplicate MANUAL log from worker path.
- *   v1.4.1 - Only one crack worker at a time — worker fills all free RAM so a
- *            second exec in the same cycle always fails. Defer additional
- *            servers until the running worker exits. Add freeRam/threads
- *            diagnostics to exec log line.
- *   v1.4.0 - Exec dnet-crack-worker.js with max threads to scale authenticate()
- *            speed. Cracking is now non-blocking: orchestrator launches worker
- *            and continues processing other servers. Result read from port 7
- *            each cycle; connectToSession() restores the orchestrator's session.
- *            Port 7 cleared on startup; state gains crackPid field.
+ *   v1.5.0 - Remove crack worker machinery — darknet hub nodes cannot exec new
+ *            scripts onto themselves even with a session. Inline sequential
+ *            cracking (crackInline) is the only viable approach from a hub.
+ *            Removes PORT_CRACK_RESULT, CRACK_WORKER, crackPid state, worker
+ *            launch/check code, and self-session attempt.
  *   v1.3.0 - Heartbleed peek before brute-force to surface clues from prior
  *            attempts. BB does not allow concurrent NS calls so Promise.all
  *            parallel cracking is not possible; sequential loop retained.
@@ -89,14 +79,10 @@
  *   1.3  ns.exec            0.6  ns.scp
  *   0.1  ns.isRunning       0.05 ns.getServerMaxRam
  *   0.6  heartbleed         0.05 ns.getServerUsedRam
- *   ~= 4.7 GB total — run from home; crack workers add 1.1 GB × threads on same host
+ *   ~= 4.7 GB total — run from home
  *
  * Dependencies:
  *   import { log, readPort, writePort, clearPort } from '/scripts/lib-utils.js';
- *
- * Ports:
- *   Reads port 7: JSON array of { host, password } from dnet-crack-worker.js.
- *                 Cleared and rewritten each cycle after draining results.
  */
 
 import { log, readPort, writePort, clearPort } from '/scripts/lib-utils.js';
@@ -113,9 +99,6 @@ const RATE_LIMIT_SLEEP_MS  = 2000;                                              
 const CYCLE_SLEEP_MS       = 200;                                                   // Minimum yield per loop iteration to avoid engine lockup
 const ORCH_SCRIPT          = '/scripts/dnet-orchestrate.js';                        // Self-path for hub propagation
 const ORCH_RAM_GB          = 5;                                                     // Approximate RAM to reserve for orchestrate on hub nodes
-const CRACK_WORKER         = '/scripts/dnet-crack-worker.js';                       // Exec'd with max threads to speed authenticate() calls
-const CRACK_WORKER_RAM_GB  = 1.1;                                                   // Per-thread RAM estimate for dnet-crack-worker.js
-const PORT_CRACK_RESULT    = 7;                                                     // Crack workers write { host, password } results here
 
 
 // --- Server state map (in-memory, survives across mutations) ---
@@ -129,7 +112,7 @@ const state = new Map();
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.4.3 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.5.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -146,22 +129,8 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.4.3 ===');
+    log(ns, '=== dnet-orchestrate.js v1.5.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
-
-    clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from any previous run
-
-    // If running on a darknet hub, attempt a self-session so exec() onto this host works.
-    // Hub nodes (passwordLength=0) auto-grant sessions — try connectToSession with blank password.
-    // This enables threading via crack workers; falls back to inline cracking if it fails.
-    const selfHost = ns.getHostname();
-    if (ns.dnet.isDarknetServer(selfHost)) {
-        const selfDetails = ns.dnet.getServerDetails(selfHost);
-        if (selfDetails.isStationary || selfDetails.passwordLength === 0) {
-            const r = ns.dnet.connectToSession(selfHost, '');
-            log(ns, 'Hub self-session on ' + selfHost + ': ' + (r.success ? 'OK — workers can exec here' : 'FAILED code=' + r.code + ' — will crack inline'));
-        }
-    }
 
     // Load any previously cracked creds from port 6 into state map
     loadCredsFromPort(ns);
@@ -189,9 +158,6 @@ export async function main(ns) {
  * @returns {Promise<void>}
  */
 async function runCycle(ns, flags) {
-    // Pick up any crack results written by dnet-crack-worker.js since last cycle
-    checkCrackResults(ns);
-
     const dnet     = ns.dnet;
     const visible  = dnet.probe();                                                  // All darknet servers directly connected to this host
 
@@ -240,7 +206,7 @@ async function runCycle(ns, flags) {
         }
 
         // Initialise state entry on first encounter
-        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false, crackPid: 0 });
+        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false });
         const s = state.get(host);
 
         s.stasisLinked = stasisLinked.has(host);                                    // Sync stasis status from live data each cycle
@@ -251,21 +217,7 @@ async function runCycle(ns, flags) {
                 log(ns, 'Cracking ' + host + ' — worker pid=' + s.crackPid + ' still running');
                 continue;                                                            // Worker in progress — result arrives next cycle
             }
-            // Only one crack worker at a time — it fills all free RAM so a second would fail
-            const anyWorkerRunning = [...state.values()].some(
-                st => st.crackPid > 0 && ns.isRunning(st.crackPid)
-            );
-            if (anyWorkerRunning) {
-                log(ns, 'CRACK DEFER ' + host + ' — another worker already running');
-                continue;
-            }
-            // Try threaded worker first (needs exec session on this host).
-            // Falls back to inline sequential cracking if worker exec fails.
-            s.crackPid = await launchCrackWorker(ns, host, d);
-            if (s.crackPid > 0) {
-                continue;                                                            // Worker launched — result arrives next cycle
-            }
-            // Worker exec failed (no exec session on hub) — crack inline instead
+            // Crack inline — hub nodes cannot exec worker scripts onto themselves
             const pw = await crackInline(ns, host, d);
             if (pw) {
                 s.password = pw;
@@ -319,7 +271,7 @@ function checkCrackResults(ns) {
     if (!Array.isArray(results) || results.length === 0) return;
 
     for (const { host, password } of results) {
-        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false, crackPid: 0 });
+        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false });
         const s = state.get(host);
         s.crackPid = 0;                                                             // Worker has exited regardless of success/failure
 
@@ -626,7 +578,7 @@ function loadCredsFromPort(ns) {
     const creds = readPort(ns, PORT_DNET_CREDS);
     if (!Array.isArray(creds)) return;
     for (const { host, password } of creds) {
-        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false, crackPid: 0 });
+        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false });
         state.get(host).password = password;
     }
     log(ns, 'Loaded ' + creds.length + ' known password(s) from port ' + PORT_DNET_CREDS);
