@@ -330,41 +330,6 @@ async function runCycle(ns, flags) {
 
 /**
  * Reads completed crack results from port 7, updates state, and establishes
- * sessions for newly cracked servers. Called at the top of every runCycle.
- * @param {NS} ns - Netscript object
- */
-function checkCrackResults(ns) {
-    const results = readPort(ns, PORT_CRACK_RESULT);
-    if (!Array.isArray(results) || results.length === 0) return;
-
-    for (const { host, password } of results) {
-        if (!state.has(host)) state.set(host, { password: null, phishPid: 0, stasisLinked: false, crackPid: 0 });
-        const s = state.get(host);
-        s.crackPid = 0;                                                             // Worker has exited regardless of success/failure
-
-        if (!password) {
-            log(ns, 'Crack worker reported failure on ' + host + ' — will relaunch next cycle');
-            continue;
-        }
-        if (s.password) continue;                                                   // Already have it (duplicate result)
-
-        s.password = password;
-        saveCredToPort(ns, host, password);
-        log(ns, 'Crack result: ' + host + ' = ' + password);
-
-        const r = ns.dnet.connectToSession(host, password);                         // Restore orchestrator's own PID-bound session
-        if (r.success) {
-            log(ns, 'Session established: ' + host);
-        } else {
-            log(ns, 'connectToSession failed for ' + host + ' code=' + r.code);
-        }
-    }
-
-    clearPort(ns, PORT_CRACK_RESULT);                                               // Drain processed results; workers will re-populate as needed
-}
-
-/**
- * Reads completed crack results from port 7, updates state, and establishes
  * sessions. Called at the top of every cycle when canExecSelf is true.
  * @param {NS} ns - Netscript object
  */
@@ -490,55 +455,6 @@ async function crackInline(ns, host, d) {
     log(ns, 'CRACK FAILED ' + host + ' — exhausted ' + total + ' combos');
     return null;
 }
-
-/**
- * Execs dnet-crack-worker.js on the current host with as many threads as fit
- * in free RAM. More threads = faster per authenticate() call per the API.
- * Returns the worker PID (> 0) on success, or 0 if the server cannot be auto-cracked.
- * @param {NS} ns - Netscript object
- * @param {string} host - Hostname of the target server
- * @param {object} d - DarknetServerDetails for the target
- * @returns {Promise<number>} Worker PID or 0
- */
-async function launchCrackWorker(ns, host, d) {
-    if (d.passwordFormat !== 'numeric' || d.passwordLength > AUTO_CRACK_MAX_LEN) {
-        return 0;                                                                    // Caller (crackInline) will log MANUAL
-    }
-
-    // Heartbleed peek — surface any clues from prior attempts before launching worker
-    const preBleed = await ns.dnet.heartbleed(host, { peek: true });
-    if (preBleed.success && preBleed.logs && preBleed.logs.length > 0) {
-        log(ns, 'HB pre-crack ' + host + ':');
-        for (const entry of preBleed.logs) log(ns, '  HB: ' + entry);
-    }
-
-    const myHost  = ns.getHostname();
-    const maxRam  = ns.getServerMaxRam(myHost);
-    const usedRam = ns.getServerUsedRam(myHost);
-    const freeRam = maxRam - usedRam;
-    const threads = Math.max(1, Math.floor(freeRam / CRACK_WORKER_RAM_GB));         // Fill free RAM with crack threads; minimum 1
-
-    log(ns, 'Crack worker RAM: max=' + maxRam.toFixed(1) + ' used=' + usedRam.toFixed(1)
-        + ' free=' + freeRam.toFixed(1) + ' → ' + threads + ' threads');
-
-    const scpOk = await ns.scp([CRACK_WORKER, LIB_UTILS], myHost, 'home');         // Ensure worker is present on this host
-    if (!scpOk) {
-        log(ns, 'CRACK WORKER SCP FAILED for ' + host);
-        return 0;
-    }
-
-    const pid = ns.exec(CRACK_WORKER, myHost, threads, host, d.passwordLength);
-    if (pid === 0) {
-        log(ns, 'CRACK WORKER EXEC FAILED for ' + host
-            + ' (freeRam=' + freeRam.toFixed(1) + ' GB, threads=' + threads + ')');
-        return 0;
-    }
-
-    log(ns, 'Crack worker launched: ' + host + ' — ' + threads + ' threads (freeRam='
-        + freeRam.toFixed(1) + ' GB) pid=' + pid);
-    return pid;
-}
-
 
 // =============================================================================
 // Memory reallocation
