@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.17.4';
+const VERSION       = '3.17.5';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -245,7 +245,6 @@ async function playGame(ns, boardSize) {
 
         try {
             if (move) {
-                ns.print('[GO] play (' + move.x + ',' + move.y + ')');
                 await ns.go.makeMove(move.x, move.y);
             } else {
                 ns.print('[GO] pass (no move)');
@@ -315,7 +314,7 @@ function findAnchorMove(board, validMoves, size) {
 
     // Moves 2-N: extend our existing group — pick valid adjacent cell with most resulting libs
     const xSet = new Set(xStones.map(s => s.x * size + s.y));
-    let best = null, bestLibs = -1;
+    let best = null, bestScore = -1;
     for (const stone of xStones) {
         for (const n of getAdjacent(stone.x, stone.y, size)) {
             if (!validMoves[n.x] || !validMoves[n.x][n.y]) continue;
@@ -325,7 +324,10 @@ function findAnchorMove(board, validMoves, size) {
                      xSet.has(a.x * size + a.y)
             ).length;
             if (candidateLibs < 2) continue;
-            if (candidateLibs > bestLibs) { bestLibs = candidateLibs; best = { x: n.x, y: n.y }; }
+            // Prefer interior cells: penalise proximity to edge (edge cells are easier to surround)
+            const edgeDist = Math.min(n.x, size - 1 - n.x, n.y, size - 1 - n.y);
+            const score = candidateLibs * 10 + edgeDist;
+            if (score > bestScore) { bestScore = score; best = { x: n.x, y: n.y }; }
         }
     }
     return best;
