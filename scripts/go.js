@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.8.0
+ * Version: 3.9.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -72,7 +72,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.8.0';
+const VERSION       = '3.9.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -117,7 +117,7 @@ export async function main(ns) {
 
         ns.print('[GO] New game vs ' + opponent + ' (' + flags.size + 'x' + flags.size + ')');
 
-        const result = await playGame(ns, flags.size);
+        const result = await playGame(ns, flags.size, opponent);
 
         if (result === 'win') {
             totalWins++;
@@ -143,7 +143,7 @@ export async function main(ns) {
 // Game loop
 // =============================================================================
 
-async function playGame(ns, boardSize) {
+async function playGame(ns, boardSize, opponent) {
     while (true) {
         let state;
         try {
@@ -166,7 +166,7 @@ async function playGame(ns, boardSize) {
         const validMoves = ns.go.analysis.getValidMoves();
         const liberties  = ns.go.analysis.getLiberties();
         const controlled = ns.go.analysis.getControlledEmptyNodes();
-        const move       = pickMove(board, validMoves, liberties, controlled, boardSize);
+        const move       = pickMove(board, validMoves, liberties, controlled, boardSize, opponent);
 
         try {
             if (move) {
@@ -202,7 +202,7 @@ function interpretResult(state) {
  * liberties  — number[][] from getLiberties(). liberties[x][y] = count for stone, -1 for empty/dead
  * controlled — string[] from getControlledEmptyNodes(). controlled[x][y] = 'X'/'O'/'?'/'#'
  */
-function pickMove(board, validMoves, liberties, controlled, size) {
+function pickMove(board, validMoves, liberties, controlled, size, opponent) {
     // --- 1. Capture: fill last liberty of an enemy group ---
     const capture = findGroupAtLiberties(board, validMoves, liberties, size, 'O', 1);
     if (capture) return capture;
@@ -221,7 +221,7 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
+            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size, opponent) });
         }
     }
 
@@ -318,34 +318,40 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
 /**
  * Score a candidate move. Higher = better.
  *
- * Factors:
- * - Positional: 2nd-line preferred (ideal = floor(size/4))
- * - Territory:  extend own ('X' ctrl) +3, neutral ('?') +2, enemy ('O') -3 — build our moyo, don't walk into theirs
- * - Connectivity: adjacent own stone +2
- * - Openness: +0.5 per empty cell within Manhattan-2 — prefer open space over contested zones
+ * Opponent-aware weights:
+ *   Slum Snakes — moyo strategy: build in open space, avoid walking into their chain.
+ *                 Their chain is huge but they pass 35% of time — our stones near it get surrounded.
+ *                 O: -3  X: +3  ?: +2  + openness bonus
+ *   All others  — contest strategy (v3.2.0): play near enemy territory to block growth.
+ *                 Netburners/TBH/etc never pass — playing near their chain creates boundary walls.
+ *                 O: +4  X: +1  ?: +3  (proven 64% vs Netburners)
  */
-function moveScore(board, controlled, x, y, size) {
+function moveScore(board, controlled, x, y, size, opponent) {
     let score = positionalScore(x, y, size);
+
+    const moyo = opponent === 'Slum Snakes';
 
     for (const n of getAdjacent(x, y, size)) {
         const cell = board[n.x] && board[n.x][n.y];
         const ctrl = controlled[n.x] && controlled[n.x][n.y];
 
         if (cell === '.') {
-            if (ctrl === 'X') score += 3;
-            if (ctrl === '?') score += 2;
-            if (ctrl === 'O') score -= 3;
+            if (ctrl === 'X') score += moyo ? 3 : 1;
+            if (ctrl === '?') score += moyo ? 2 : 3;
+            if (ctrl === 'O') score += moyo ? -3 : 4;
         }
         if (cell === 'X') score += 2;
     }
 
-    // Openness: empty cells within Manhattan distance 2 — more open space = more future potential
+    // Openness: empty cells within Manhattan-2 — helps moyo stay in open space.
+    // Also a mild bonus for all opponents (open positions have more future potential).
+    const opennessWeight = moyo ? 0.5 : 0.2;
     for (let dx = -2; dx <= 2; dx++) {
         for (let dy = -2; dy <= 2; dy++) {
             if (Math.abs(dx) + Math.abs(dy) > 2) continue;
             const nx = x + dx, ny = y + dy;
             if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
-            if (board[nx] && board[nx][ny] === '.') score += 0.5;
+            if (board[nx] && board[nx][ny] === '.') score += opennessWeight;
         }
     }
 
