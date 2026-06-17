@@ -40,6 +40,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.14.0 - DeepGreen (Mastermind): use authenticate() feedback data="exact,misplaced"
+ *            to solve via constraint elimination (~7–15 calls vs thousands of brute-force).
+ *            Falls through to crack worker only for rare alphanumeric passwords.
  *   v1.13.0 - propagateToHub always SCPs before checking isRunning — hub nodes
  *            now receive script updates every cycle and pick them up on next
  *            natural restart rather than lagging until a mutation kills them.
@@ -179,7 +182,7 @@ let canExecSelf = false;
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.13.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.14.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -196,7 +199,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.13.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.14.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -521,6 +524,7 @@ function isHandledInline(d) {
         case 'TopPass':          // 95-word common password dictionary
         case 'EuroZone Free':    // 27 EU country names
         case 'PHP 5.4':          // sorted digits → permutations (avoids sequential brute-force)
+        case 'DeepGreen':        // Mastermind: feedback in authenticate() data field — no brute force needed
             return true;
         default:
             return false;
@@ -671,6 +675,13 @@ async function crackInline(ns, host, d) {
         }
         log(ns, 'RomanNumeral range exhausted ' + host);
         return null;
+    }
+
+    // --- DeepGreen (Mastermind): each failed authenticate() returns "exact,misplaced" in data ---
+    // Numeric passwords only (alphanumeric falls through to null → crack worker handles it).
+    // Converges in ~7–15 attempts instead of brute-force thousands.
+    if (d.modelId === 'DeepGreen') {
+        return await crackMastermind(ns, host, d);
     }
 
     // --- PHP 5.4 (SortedEchoVuln): d.data = sorted digits → try all unique permutations ---
@@ -980,6 +991,86 @@ async function propagateToStasisLinked(ns, skip) {
 // =============================================================================
 // Crack helpers
 // =============================================================================
+
+/**
+ * Mastermind solver for DeepGreen.
+ * Each failed authenticate() returns data = "exactCount,misplacedCount".
+ * Iterates numeric candidates, eliminating inconsistent ones after each attempt.
+ * Numeric passwords (no leading zeros) are handled; returns null for alphanumeric
+ * (no consistent numeric candidate found) so the caller falls through to crack worker.
+ */
+async function crackMastermind(ns, host, d) {
+    const len         = d.passwordLength;
+    const constraints = [];
+
+    // Initial guess: spread distinct digits across positions for maximum first-response info.
+    // Avoid leading zero — start from '1'.
+    const DIGITS  = '1234567890';
+    let guess = '';
+    for (let i = 0; i < len; i++) guess += DIGITS[i % 10];
+
+    log(ns, 'Mastermind ' + host + ' len=' + len + ' first=' + guess);
+
+    for (let attempt = 0; attempt < 100; attempt++) {
+        const r = await ns.dnet.authenticate(host, guess);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + guess + ' (Mastermind ' + (attempt + 1) + ' attempts)'); return guess; }
+        if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') { await ns.sleep(RATE_LIMIT_SLEEP_MS); continue; }
+
+        if (!r.data || !r.data.includes(',')) {
+            log(ns, 'Mastermind bad response ' + host + ' data=' + r.data);
+            return null;
+        }
+
+        const parts    = r.data.split(',');
+        const exact    = parseInt(parts[0]);
+        const misplaced = parseInt(parts[1]);
+        constraints.push({ guess, exact, misplaced });
+
+        const next = mmFindCandidate(len, constraints);
+        if (next === null) {
+            log(ns, 'Mastermind ' + host + ' — no numeric candidate left (alphanumeric password?)');
+            return null;                                                             // Alphanumeric — fall through to crack worker
+        }
+        guess = next;
+    }
+
+    log(ns, 'Mastermind ' + host + ' — exhausted 100 attempts');
+    return null;
+}
+
+/** Returns the first numeric candidate (no leading zeros) consistent with all constraints. */
+function mmFindCandidate(len, constraints) {
+    const min = len === 1 ? 0 : Math.pow(10, len - 1);
+    const max = Math.pow(10, len);
+    for (let n = min; n < max; n++) {
+        const candidate = String(n);
+        if (mmConsistent(candidate, constraints)) return candidate;
+    }
+    return null;
+}
+
+/**
+ * Returns true if `candidate` is consistent with every (guess, exact, misplaced) constraint.
+ * Exact = chars matching at the same position; misplaced = chars present but at wrong positions.
+ */
+function mmConsistent(candidate, constraints) {
+    for (const { guess, exact, misplaced } of constraints) {
+        let exactCount = 0;
+        for (let i = 0; i < candidate.length; i++) {
+            if (candidate[i] === guess[i]) exactCount++;
+        }
+        if (exactCount !== exact) return false;
+
+        const cc = {};
+        const gc = {};
+        for (const c of candidate) cc[c] = (cc[c] || 0) + 1;
+        for (const c of guess)     gc[c] = (gc[c] || 0) + 1;
+        let overlap = 0;
+        for (const c in gc) overlap += Math.min(gc[c], cc[c] || 0);
+        if (overlap - exactCount !== misplaced) return false;
+    }
+    return true;
+}
 
 /**
  * Returns all unique permutations of the characters in str, sorted lexicographically.
