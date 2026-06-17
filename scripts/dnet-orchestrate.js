@@ -1,8 +1,8 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.13.0
+ * Version: 1.20.0
  *
- * Master darknet controller: crack → memfree → deploy phish → stasis.
+ * Master darknet controller: crack → memfree → relay → phish → stasis.
  *
  * Behaviour:
  *   Runs a continuous loop gated on dnet.nextMutation(). Each cycle:
@@ -20,19 +20,23 @@
  *               Result arrives on port 7; orchestrator connects via connectToSession.
  *   4. MEMFREE — for cracked servers with blocked RAM: runs memoryReallocation()
  *               inline (same PID = same session). Loops until RAM freed or fail.
- *   5. PHISH  — for cracked servers where dnet-phish.js is not already running:
- *               SCPs dnet-phish.js + lib-utils.js to the target then exec()s
- *               with as many threads as fit in free RAM.
- *   6. STASIS — for cracked servers not yet stasis-linked, within the global
+ *   5. RELAY  — for cracked darknet servers with >= ORCH_EXEC_RAM_GB free: SCP and
+ *               exec orchestrate onto the server. That instance probes and cracks its
+ *               own visible neighbours, enabling recursive depth expansion without
+ *               additional stasis slots. home→darkweb→depth0→depth1→…
+ *               Relay nodes skip phish (orchestrate occupies the RAM); they earn
+ *               indirectly by deploying phish on their own leaf servers.
+ *   6. PHISH  — for cracked servers NOT acting as relays: SCPs dnet-phish.js +
+ *               lib-utils.js to the target then exec()s with as many threads as fit.
+ *   7. STASIS — for cracked servers not yet stasis-linked, within the global
  *               stasis limit, prioritised by shallowest depth: SCPs
  *               dnet-stasis-set.js then exec()s onto the target (requires
  *               STASIS_RAM_GB free on target).
- *   7. EXPAND — propagateToStasisLinked(): for stasis-linked servers NOT in
+ *   8. EXPAND — propagateToStasisLinked(): for stasis-linked servers NOT in
  *               probe() list (i.e. deeper than current host), gets a session
  *               via connectToSession() and exec()s orchestrator onto them.
- *               Stasis links enable exec at any distance per the darknet API.
- *               Enables recursive depth expansion: home→darkweb→depth0→depth1→…
- *   8. WAIT   — nextMutation() sleeps until the next network mutation event.
+ *               Safety net: restarts relay orchestrators killed by mutations.
+ *   9. WAIT   — nextMutation() sleeps until the next network mutation event.
  *
  *   Session note: authenticate() and connectToSession() sessions are bound to
  *   this script's PID. memoryReallocation() and exec() onto darknet servers
@@ -40,6 +44,13 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.20.0 - Relay chaining: ensureOrchRelay() deploys orchestrate on every
+ *            cracked darknet server with >= ORCH_EXEC_RAM_GB (15 GB) free.
+ *            Relay nodes skip phish; their orchestrate instances discover and
+ *            crack deeper neighbours independently. Depth expands without
+ *            additional stasis slots: home→darkweb→depth0→depth1→…
+ *            Removed ORCH_RAM_GB reservation from ensurePhish — relay deployment
+ *            now runs before phish and handles that decision explicitly.
  *   v1.19.0 - PHISH_RAM_GB 4→6 (actual dnet-phish.js cost is 5.85 GB; ramOverride
  *            cannot go below runtime usage — BB checks dynamically per-function call).
  *   v1.18.0 - PHISH EXEC FAILED diagnostic: log actual phishRam × threads vs freeRam.
@@ -150,7 +161,7 @@ const AUTO_CRACK_MAX_LEN = 4;                                                   
 const RATE_LIMIT_SLEEP_MS  = 2000;                                                  // Pause after rate-limit or timeout response from authenticate
 const CYCLE_SLEEP_MS       = 200;                                                   // Minimum yield per loop iteration to avoid engine lockup
 const ORCH_SCRIPT          = '/scripts/dnet-orchestrate.js';                        // Self-path for hub propagation
-const ORCH_RAM_GB          = 5;                                                     // Approximate RAM to reserve for orchestrate on hub nodes
+const ORCH_EXEC_RAM_GB     = 15;                                                    // RAM needed to exec orchestrate — matches ns.ramOverride(15) in main()
 const CRACK_WORKER         = '/scripts/dnet-crack-worker.js';                       // Exec'd with N threads on cracked hosts; more threads = faster authenticate()
 const CRACK_WORKER_RAM_GB  = 1.1;                                                   // Per-thread RAM estimate for dnet-crack-worker.js
 const PORT_CRACK_RESULT    = 7;                                                     // Crack workers write { host, password } results here
@@ -193,7 +204,7 @@ let canExecSelf = false;
 /** @param {NS} ns */
 export async function main(ns) {
     ns.ramOverride(15);                                                              // Calculated cost is 16.30 GB but darkweb cap is 16 GB; override to fit
-    ns.tprint('=== dnet-orchestrate.js v1.19.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.20.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -210,7 +221,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.19.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.20.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -363,9 +374,14 @@ async function runCycle(ns, flags) {
             await freeMemory(ns, host, d.blockedRam);
         }
 
+        // --- RELAY: deploy orchestrate so this server discovers its own neighbours ---
+        // Relay nodes skip phish — orchestrate occupies the RAM and earns indirectly
+        // by deploying phish on the deeper leaf servers it discovers.
+        const isRelay = await ensureOrchRelay(ns, host);
+
         // --- PHISH ---
-        if (!flags['no-phish']) {
-            s.phishPid = await ensurePhish(ns, host, s.phishPid, stasisUsed >= stasisLimit);
+        if (!flags['no-phish'] && !isRelay) {
+            s.phishPid = await ensurePhish(ns, host, s.phishPid);
         }
 
         // --- STASIS ---
@@ -787,24 +803,22 @@ async function freeMemory(ns, host, initialBlocked) {
 /**
  * Ensures dnet-phish.js is running on the target server. Re-deploys if the
  * previous PID has died (e.g. server restarted after a mutation).
+ * Only called on leaf nodes — relay nodes are handled by ensureOrchRelay and skipped.
  * @param {NS} ns - Netscript object
  * @param {string} host - Hostname of the cracked darknet server
  * @param {number} prevPid - PID from a previous deploy, or 0 if none
  * @returns {Promise<number>} Active PID, or 0 if deploy failed
  */
-async function ensurePhish(ns, host, prevPid, stasisFull) {
+async function ensurePhish(ns, host, prevPid) {
     if (prevPid > 0 && ns.isRunning(prevPid)) return prevPid;                      // Script still alive — no action needed
 
-    const maxRam    = ns.getServerMaxRam(host);
-    const usedRam   = ns.getServerUsedRam(host);
-    const freeRam   = maxRam - usedRam;
-    const reserve   = stasisFull ? 0 : ORCH_RAM_GB;                                // No point reserving headroom when stasis slots are exhausted
-    const available = freeRam - reserve;
-    const threads   = Math.floor(available / PHISH_RAM_GB);                         // Fill remaining RAM with phish threads
+    const maxRam  = ns.getServerMaxRam(host);
+    const usedRam = ns.getServerUsedRam(host);
+    const freeRam = maxRam - usedRam;
+    const threads = Math.floor(freeRam / PHISH_RAM_GB);                            // Fill all free RAM with phish threads
 
     if (threads < 1) {
-        log(ns, 'PHISH SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free'
-            + (reserve > 0 ? ' after ' + reserve + ' GB reserved' : '') + ' (need ' + PHISH_RAM_GB + ')');
+        log(ns, 'PHISH SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ' + PHISH_RAM_GB + ')');
         return 0;
     }
 
@@ -824,6 +838,46 @@ async function ensurePhish(ns, host, prevPid, stasisFull) {
 
     log(ns, 'PHISH deployed ' + host + ' t=' + threads + ' pid=' + pid);
     return pid;
+}
+
+
+// =============================================================================
+// Relay propagation
+// =============================================================================
+
+/**
+ * Ensures orchestrate is running on a cracked darknet server so it can probe and
+ * crack its own visible neighbours, enabling recursive depth expansion without
+ * additional stasis slots.
+ *
+ * Only deploys when the server has >= ORCH_EXEC_RAM_GB (15 GB) free — matching
+ * the ns.ramOverride(15) in main(). Servers below this threshold become phish
+ * leaf nodes instead.
+ *
+ * @param {NS} ns - Netscript object
+ * @param {string} host - Hostname of the cracked darknet server
+ * @returns {Promise<boolean>} true if orchestrate is running (or just deployed); false if skipped
+ */
+async function ensureOrchRelay(ns, host) {
+    if (ns.isRunning(ORCH_SCRIPT, host)) return true;                              // Already running — nothing to do
+
+    const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+    if (freeRam < ORCH_EXEC_RAM_GB) return false;                                  // Not enough RAM — this server becomes a phish leaf
+
+    const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host, 'home');
+    if (!scpOk) {
+        log(ns, 'RELAY SCP FAILED ' + host);
+        return false;
+    }
+
+    const pid = ns.exec(ORCH_SCRIPT, host, 1);
+    if (pid === 0) {
+        log(ns, 'RELAY EXEC FAILED ' + host + ' — freeRam=' + freeRam.toFixed(1) + ' GB');
+        return false;
+    }
+
+    log(ns, 'RELAY deployed orchestrate → ' + host + ' pid=' + pid);
+    return true;
 }
 
 
@@ -863,14 +917,14 @@ async function applyStasis(ns, host) {
 
 
 // =============================================================================
-// Hub propagation
+// Hub propagation (darkweb gateway — no password, session pre-granted)
 // =============================================================================
 
 /**
- * Deploys a copy of the orchestrator onto a hub node (e.g. darkweb) so it can
- * probe and crack the next layer of servers. Hub nodes have sessions but no
- * password — we cannot crack them, but we can exec onto them.
- * Skips deployment if orchestrate is already running on the hub.
+ * Deploys the orchestrator onto a hub node (e.g. darkweb) so it can probe and
+ * crack the next layer of servers. Hub nodes have sessions but no password —
+ * they cannot be cracked, but we can exec onto them via the pre-granted session.
+ * Relay chaining (ensureOrchRelay) then handles cracked servers from there.
  * @param {NS} ns - Netscript object
  * @param {string} host - Hostname of the hub server
  * @returns {Promise<void>}
@@ -989,8 +1043,8 @@ async function propagateToStasisLinked(ns, skip) {
         }
 
         const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
-        if (freeRam < ORCH_RAM_GB) {
-            log(ns, 'STASIS EXPAND skip ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ~' + ORCH_RAM_GB + ')');
+        if (freeRam < ORCH_EXEC_RAM_GB) {
+            log(ns, 'STASIS EXPAND skip ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ' + ORCH_EXEC_RAM_GB + ')');
             continue;
         }
 
