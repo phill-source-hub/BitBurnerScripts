@@ -321,7 +321,6 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, inves
 
     // --- Pass 2: Buys ---
     // How much of our investLimit is already deployed (cost basis of open positions)
-    const symbols = ns.stock.getSymbols();
     let currentlyInvested = 0;
     for (const sym of symbols) {
         const [shares, avgPx] = ns.stock.getPosition(sym);
