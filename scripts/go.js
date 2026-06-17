@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.13.0
+ * Version: 3.14.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -13,8 +13,9 @@
  *     2. Defend:        fill the last liberty of any of our groups (valid move)
  *     3. Defend early:  fill a liberty of any of our groups at ≤2 libs
  *                       (prevents Black Hand's surround→atari combo)
- *     4. Expand:        best valid move scored by territory + threats + connectivity
- *     5. Pass:          no valid move or all remaining moves score very low
+ *     4. MCTS:          rank top-N heuristic candidates via Monte Carlo rollouts;
+ *                       pick move with highest simulated win rate
+ *     5. Pass:          no valid move or <5% win rate across all candidates
  *
  *   Opponent selection: starts at easiest ('Netburners'), advances after
  *   WIN_THRESHOLD consecutive wins to the next opponent. Tracks wins/losses
@@ -24,6 +25,13 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.14.0 - Replace greedy expand step with MCTS (Monte Carlo Tree Search):
+ *             top-8 candidates by heuristic score each get MCTS_ROLLOUTS random
+ *             simulations; pick highest win rate. Pure JS board ops on Uint8Array
+ *             (no NS calls in rollout) — fits within MOVE_DELAY budget.
+ *             Goal: break 37% Slum Snakes ceiling that greedy scoring cannot exceed.
+ *   v3.13.0 - Revert to pure v3.2.0 (no opening book, no opponent threading).
+ *             Baseline: ~64% Netburners, ~37% Slum Snakes.
  *   v3.7.0 - Revert to v3.2.0 pure territory scoring. All chain-based experiments
  *            (v3.3–v3.6) degraded Slum Snakes from 37% to 24–25%; interdict put
  *            isolated stones adjacent to enemy chain = easy captures. v3.2.0 remains
@@ -72,7 +80,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.13.0';
+const VERSION       = '3.14.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -216,24 +224,38 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
-    // --- 4. Expand: score all valid moves ---
+    // --- 4. MCTS: rank top-N heuristic candidates via Monte Carlo rollouts ---
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
+            candidates.push({ x, y, h: moveScore(board, controlled, x, y, size) });
         }
     }
 
     if (candidates.length === 0) return null;
 
-    candidates.sort((a, b) => b.score - a.score);
-    const best = candidates[0];
+    candidates.sort((a, b) => b.h - a.h);
+    const top  = candidates.slice(0, Math.min(MCTS_CANDIDATES, candidates.length));
+    const t    = _adj(size);
+    const flat = _toFlat(board, size);
 
-    // Pass if best move scores very low
-    if (best.score < -5) return null;
+    let bestMove = top[0];
+    let bestRate = -1;
 
-    return best;
+    for (const cand of top) {
+        const after = _applyMove(flat, cand.x * size + cand.y, 1, t);
+        if (!after) continue;
+        let wins = 0;
+        for (let r = 0; r < MCTS_ROLLOUTS; r++) {
+            if (_rollout(after, 2, t, size)) wins++;
+        }
+        const rate = wins / MCTS_ROLLOUTS;
+        if (rate > bestRate) { bestRate = rate; bestMove = cand; }
+    }
+
+    // Pass only if we're completely losing across all candidates
+    return bestRate < 0.05 ? null : bestMove;
 }
 
 /**
@@ -361,4 +383,168 @@ function getAdjacent(x, y, size) {
     if (y > 0)        result.push({ x, y: y - 1 });
     if (y < size - 1) result.push({ x, y: y + 1 });
     return result;
+}
+
+
+// =============================================================================
+// MCTS — Monte Carlo Tree Search helpers
+// All board operations run on flat Uint8Arrays (no NS calls).
+// Color encoding: 0=empty, 1=X(us/Black), 2=O(enemy/White), 3=dead('#').
+// =============================================================================
+
+const MCTS_CANDIDATES = 8;   // top-N moves by heuristic to simulate
+const MCTS_ROLLOUTS   = 40;  // random rollouts per candidate
+const MCTS_DEPTH      = 20;  // max plies per rollout
+
+/** Precomputed flat adjacency lists keyed by board size. */
+const _adjCache = {};
+
+function _adj(size) {
+    if (_adjCache[size]) return _adjCache[size];
+    const t = new Array(size * size);
+    for (let i = 0; i < size * size; i++) {
+        const x = (i / size) | 0, y = i % size;
+        const a = [];
+        if (x > 0)        a.push(i - size);
+        if (x < size - 1) a.push(i + size);
+        if (y > 0)        a.push(i - 1);
+        if (y < size - 1) a.push(i + 1);
+        t[i] = a;
+    }
+    return (_adjCache[size] = t);
+}
+
+/** Convert string[] board to flat Uint8Array. 1=X(us), 2=O(enemy), 0=empty/dead. */
+function _toFlat(board, size) {
+    const arr = new Uint8Array(size * size);
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            const c = board[x] && board[x][y];
+            if (c === 'X') arr[x * size + y] = 1;
+            else if (c === 'O') arr[x * size + y] = 2;
+        }
+    }
+    return arr;
+}
+
+/** Count liberties of the group containing cell `start`. */
+function _libs(arr, start, t) {
+    const color = arr[start];
+    const seen  = new Uint8Array(arr.length);
+    const stack = [start];
+    seen[start]  = 1;
+    let libs     = 0;
+    while (stack.length) {
+        const cur = stack.pop();
+        for (const n of t[cur]) {
+            if (seen[n]) continue;
+            seen[n] = 1;
+            if (arr[n] === 0)        libs++;
+            else if (arr[n] === color) stack.push(n);
+        }
+    }
+    return libs;
+}
+
+/** Return all cell indices belonging to the group containing `start`. */
+function _flood(arr, start, t) {
+    const color = arr[start];
+    const seen  = new Uint8Array(arr.length);
+    const stack = [start];
+    const cells = [];
+    seen[start]  = 1;
+    while (stack.length) {
+        const cur = stack.pop();
+        cells.push(cur);
+        for (const n of t[cur]) {
+            if (!seen[n] && arr[n] === color) { seen[n] = 1; stack.push(n); }
+        }
+    }
+    return cells;
+}
+
+/**
+ * Place `color` at `idx`. Captures surrounded enemy groups.
+ * Returns new board array, or null if the move is invalid (occupied or suicide).
+ */
+function _applyMove(arr, idx, color, t) {
+    if (arr[idx] !== 0) return null;
+    const next  = new Uint8Array(arr);
+    next[idx]   = color;
+    const enemy = color === 1 ? 2 : 1;
+    let captured = false;
+    for (const n of t[idx]) {
+        if (next[n] === enemy && _libs(next, n, t) === 0) {
+            for (const c of _flood(next, n, t)) next[c] = 0;
+            captured = true;
+        }
+    }
+    if (!captured && _libs(next, idx, t) === 0) return null; // suicide
+    return next;
+}
+
+/**
+ * Territory score via flood-fill of empty regions.
+ * A region enclosed solely by color C scores for C; contested regions score 0.
+ * Returns { xs, os } = territory + stone counts for Black(1) and White(2).
+ */
+function _score(arr, t) {
+    let xs = 0, os = 0;
+    const vis = new Uint8Array(arr.length);
+    for (let i = 0; i < arr.length; i++) {
+        if (arr[i] === 1) { xs++; continue; }
+        if (arr[i] === 2) { os++; continue; }
+        if (arr[i] !== 0 || vis[i]) continue;
+        const stack  = [i];
+        const region = [];
+        vis[i] = 1;
+        let hasX = false, hasO = false;
+        while (stack.length) {
+            const cur = stack.pop();
+            region.push(cur);
+            for (const n of t[cur]) {
+                if (!vis[n]) {
+                    if (arr[n] === 0) { vis[n] = 1; stack.push(n); }
+                    else if (arr[n] === 1) hasX = true;
+                    else if (arr[n] === 2) hasO = true;
+                }
+            }
+        }
+        if (hasX && !hasO)      xs += region.length;
+        else if (hasO && !hasX) os += region.length;
+    }
+    return { xs, os };
+}
+
+/**
+ * Run one random rollout starting from `arr` with `toPlay` moving next.
+ * Both players choose uniformly from valid (non-suicide) moves.
+ * Returns true if X (us, color=1) wins.
+ */
+function _rollout(arr, toPlay, t, size) {
+    let cur    = arr;
+    let player = toPlay;
+    let passes = 0;
+    const N    = size * size;
+
+    for (let depth = 0; depth < MCTS_DEPTH; depth++) {
+        // Collect empty cells and Fisher-Yates shuffle for random order
+        const empties = [];
+        for (let i = 0; i < N; i++) if (cur[i] === 0) empties.push(i);
+        for (let i = empties.length - 1; i > 0; i--) {
+            const j   = (Math.random() * (i + 1)) | 0;
+            const tmp = empties[i]; empties[i] = empties[j]; empties[j] = tmp;
+        }
+
+        let played = false;
+        for (const idx of empties) {
+            const next = _applyMove(cur, idx, player, t);
+            if (next) { cur = next; played = true; passes = 0; break; }
+        }
+        if (!played) { if (++passes >= 2) break; }
+        player = player === 1 ? 2 : 1;
+    }
+
+    const { xs, os } = _score(cur, t);
+    return xs > os;
 }
