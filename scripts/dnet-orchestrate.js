@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.22.0
+ * Version: 1.23.0
  *
  * Master darknet controller: crack → memfree → relay → phish → stasis.
  *
@@ -44,6 +44,11 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.23.0 - Remove stasis from propagateToHub. Hubs have persistent auto-sessions
+ *            and home is always directly connected to darkweb — stasis on a hub
+ *            wastes a precious slot that should anchor a cracked depth-0+ server.
+ *            Stasis on cracked servers enables home to exec() at any distance via
+ *            propagateToStasisLinked, making the relay chain shorter and stabler.
  *   v1.22.0 - collectCaches(): open .cache files on the current host at the start of
  *            every cycle. Covers home node and all relay nodes — previously only
  *            dnet-phish.js (leaf nodes) claimed cache rewards.
@@ -210,7 +215,7 @@ let canExecSelf = false;
 /** @param {NS} ns */
 export async function main(ns) {
     ns.ramOverride(15);                                                              // Calculated cost is 16.30 GB but darkweb cap is 16 GB; override to fit
-    ns.tprint('=== dnet-orchestrate.js v1.22.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.23.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -227,7 +232,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.22.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.23.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -956,44 +961,17 @@ async function applyStasis(ns, host) {
  * crack the next layer of servers. Hub nodes have sessions but no password —
  * they cannot be cracked, but we can exec onto them via the pre-granted session.
  * Relay chaining (ensureOrchRelay) then handles cracked servers from there.
+ *
+ * Hubs are NOT given stasis links. Hubs have persistent auto-sessions and home
+ * is always directly connected to darkweb — stasis on a hub wastes a slot that
+ * should go to a cracked depth-0+ server to enable long-range home exec.
+ *
  * @param {NS} ns - Netscript object
  * @param {string} host - Hostname of the hub server
  * @returns {Promise<void>}
  */
 async function propagateToHub(ns, host) {
-    const stasisLinked = new Set(ns.dnet.getStasisLinkedServers());
-    const slotsLimit   = ns.dnet.getStasisLinkLimit();
-
-    // Step 1: ensure hub has a stasis link before propagating the orchestrator.
-    // We exec the stasis worker and return early this cycle — the worker needs
-    // 12 GB and its RAM must be freed before the orchestrator (5 GB) can start.
-    // On the next cycle, stasis should be confirmed and RAM freed.
-    if (!stasisLinked.has(host)) {
-        if (stasisLinked.size >= slotsLimit) {
-            log(ns, 'HUB stasis skip ' + host + ' — no stasis slots available');
-            // Fall through to propagate without stasis — better than nothing
-        } else {
-            const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
-            if (freeRam < STASIS_RAM_GB) {
-                log(ns, 'HUB stasis skip ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ' + STASIS_RAM_GB + ' for worker)');
-                // Fall through to try propagating anyway with available RAM
-            } else {
-                const scpOk = await ns.scp(STASIS_SCRIPT, host, 'home');
-                if (scpOk) {
-                    const pid = ns.exec(STASIS_SCRIPT, host, 1);
-                    if (pid > 0) {
-                        log(ns, 'HUB stasis worker exec on ' + host + ' pid=' + pid + ' — waiting next cycle to propagate');
-                        return;                                                      // Return now; stasis worker needs its 12 GB, and the next cycle will propagate orchestrate once RAM is freed
-                    }
-                    log(ns, 'HUB stasis exec failed on ' + host);
-                } else {
-                    log(ns, 'HUB stasis scp failed to ' + host);
-                }
-            }
-        }
-    }
-
-    // Step 2: always SCP latest version — keeps file on disk current so next restart picks up updates
+    // Always SCP latest version — keeps file on disk current so next restart picks up updates
     const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host, 'home');
     if (!scpOk) {
         log(ns, 'HUB SCP FAILED ' + host);
