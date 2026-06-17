@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.17.8';
+const VERSION       = '3.17.9';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -273,7 +273,7 @@ function interpretResult(state) {
 // Opening anchor
 // =============================================================================
 
-const ANCHOR_STONES = 999;  // always extend the connected group; MCTS is fallback only
+const ANCHOR_STONES = 5;    // connected opening; MCTS takes over but stays adjacent to group
 
 /**
  * Opening book: build a connected anchor group near center for the first ANCHOR_STONES moves.
@@ -314,22 +314,17 @@ function findAnchorMove(board, validMoves, size) {
 
     // Moves 2-N: extend our existing group — pick valid adjacent cell with most resulting libs
     const xSet = new Set(xStones.map(s => s.x * size + s.y));
-    let best = null, bestScore = -Infinity;
+    let best = null, bestScore = -1;
     for (const stone of xStones) {
         for (const n of getAdjacent(stone.x, stone.y, size)) {
             if (!validMoves[n.x] || !validMoves[n.x][n.y]) continue;
-            const adj = getAdjacent(n.x, n.y, size);
-            // Skip cells directly adjacent to an enemy stone — placing there is usually immediately dangerous
-            if (adj.some(a => board[a.x] && board[a.x][a.y] === 'O')) continue;
-            // Count how many empty cells + friendly stones are adjacent (future group libs)
-            const candidateLibs = adj.filter(
+            const candidateLibs = getAdjacent(n.x, n.y, size).filter(
                 a => (board[a.x] && board[a.x][a.y] === '.') ||
                      xSet.has(a.x * size + a.y)
             ).length;
             if (candidateLibs < 2) continue;
-            // Strongly prefer interior cells — edge cells are trivially surrounded
             const edgeDist = Math.min(n.x, size - 1 - n.x, n.y, size - 1 - n.y);
-            const score = candidateLibs + edgeDist * 5;
+            const score = candidateLibs * 10 + edgeDist;
             if (score > bestScore) { bestScore = score; best = { x: n.x, y: n.y }; }
         }
     }
@@ -378,23 +373,35 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
     const flat   = _toFlat(board, size);
     const baseXs = _score(flat, t).xs;  // our territory before any move (shared baseline)
 
+    // Build candidate set, flagging cells adjacent to our existing group
+    const xAdjSet = new Set();
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            if (board[x] && board[x][y] === 'X') {
+                for (const n of getAdjacent(x, y, size)) xAdjSet.add(n.x * size + n.y);
+            }
+        }
+    }
+
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
             const idx   = x * size + y;
             const after = _applyMove(flat, idx, 1, t);
-            // Territory gain: how many more X-controlled points after this move
             const terr  = after ? Math.max(0, _score(after, t).xs - baseXs) : 0;
             const h     = moveScore(board, controlled, x, y, size) + TERR_WEIGHT * terr;
-            candidates.push({ x, y, idx, h });
+            candidates.push({ x, y, idx, h, adj: xAdjSet.has(idx) });
         }
     }
 
     if (candidates.length === 0) return null;
 
     candidates.sort((a, b) => b.h - a.h);
-    const top = candidates.slice(0, Math.min(MCTS_CANDIDATES, candidates.length));
+    // Prefer connected plays (adjacent to our group); fall back to all candidates if none exist
+    const connected = candidates.filter(c => c.adj);
+    const pool = connected.length > 0 ? connected : candidates;
+    const top = pool.slice(0, Math.min(MCTS_CANDIDATES, pool.length));
 
     let bestMove = top[0];
     let bestRate = -1;
