@@ -1,6 +1,6 @@
 /**
  * stocks.js
- * Version: 2.0.0
+ * Version: 2.1.0
  *
  * Progressive stock market trading automation.
  *
@@ -28,7 +28,7 @@
  *     (bid - avgPx) × shares - 2×COMMISSION      (conservative: explicit both commissions)
  *
  * Guards:
- *   - MIN_ACCOUNT: no trading below $100M account balance
+ *   - MAX_INVEST_FRAC: max 40% of startup cash invested at any time
  *   - TRADE_CAP_FRAC: max 2% of account per single buy
  *   - MAX_SHARES_FRAC: max 1% of maxShares per position (market-depth guard)
  *   - MIN_POSITION_VALUE: min $1M position (commission ratio guard)
@@ -37,6 +37,8 @@
  *   - Legacy flush: positions found at startup not in ownedByUs sold unconditionally
  *
  * Changelog:
+ *   v2.1.0 - Replace fixed £100M MIN_ACCOUNT with dynamic invest cap: capture cash
+ *             at startup, invest at most 40% of that at any time. Removes --floor flag.
  *   v2.0.0 - Switch to ns.stock.nextUpdate() — runs immediately after each game
  *            engine tick so bid/forecast are always consistent. Eliminates the
  *            stale-bid race that required the now-removed cycle-spike guard.
@@ -56,7 +58,6 @@
  *   v1.0.0 - Initial version.
  *
  * Flags:
- *   --floor N      Minimum cash fraction to keep liquid (default: 0.30)
  *   --once         Single cycle and exit
  *   --sell-all     Sell all open long positions and exit (graceful shutdown)
  *
@@ -69,7 +70,7 @@
  * RAM: ~7 GB
  */
 
-const VERSION     = '2.0.0';
+const VERSION     = '2.1.0';
 const PORT_STOCKS = 4;
 
 // Forecast thresholds
@@ -96,8 +97,8 @@ const COMMISSION = 100e3;
 // Maximum spend per single buy: 2% of total account balance
 const TRADE_CAP_FRAC = 0.02;
 
-// Minimum account balance before any new buys are placed
-const MIN_ACCOUNT = 100e6;
+// Maximum fraction of startup cash to keep invested at any time
+const MAX_INVEST_FRAC = 0.40;
 
 // Ticks to wait before re-buying a symbol after selling it
 const CHURN_COOLDOWN = 10;
@@ -143,7 +144,6 @@ function sellAll(ns) {
 
 export async function main(ns) {
     const flags = ns.flags([
-        ['floor',    0.30],
         ['once',     false],
         ['sell-all', false],
         ['interval', 6],   // kept for backwards compat — ignored when TIX available
@@ -151,7 +151,7 @@ export async function main(ns) {
     ]);
 
     ns.disableLog('ALL');
-    ns.print('=== stocks.js v' + VERSION + ' | floor=' + (flags.floor * 100).toFixed(0) + '% ===');
+    ns.print('=== stocks.js v' + VERSION + ' ===');
 
     if (flags['sell-all']) {
         sellAll(ns);
@@ -164,8 +164,12 @@ export async function main(ns) {
     const ownedByUs    = new Set();  // symbols bought this session (single-entry)
     const lastForecast = {};  // sym → forecast from previous tick (debug delta display)
 
-    const MONEY_FLOOR = flags.floor;
+    const startCash   = ns.getPlayer().money;
+    const investLimit = startCash * MAX_INVEST_FRAC;
     const stats       = { realised: 0, buys: 0, sells: 0 };
+
+    ns.print('[STOCKS] startup cash=' + ns.format.number(startCash) +
+             ' | invest cap=' + ns.format.number(investLimit) + ' (40%)');
 
     ns.clearPort(PORT_STOCKS);
     ns.atExit(() => ns.clearPort(PORT_STOCKS));
@@ -178,7 +182,7 @@ export async function main(ns) {
             await ns.sleep(6000);
         }
 
-        tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, MONEY_FLOOR, stats);
+        tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, investLimit, stats);
         if (flags.once) break;
     }
 }
@@ -188,7 +192,7 @@ export async function main(ns) {
 // Tick
 // =============================================================================
 
-function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, moneyFloor, stats) {
+function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, investLimit, stats) {
     const hasWSE = ns.stock.hasWseAccount();
     const hasTIX = ns.stock.hasTixApiAccess();
     const has4S  = hasTIX && ns.stock.has4SDataTixApi();
@@ -260,7 +264,6 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, money
     }
 
     const mode = '4S';
-    let cashLeft   = player.money * (1 - moneyFloor);
     const tradeCap = player.money * TRADE_CAP_FRAC;
     let cycleBuys = 0, cycleSells = 0;
     let unrealised = 0, openPositions = 0;
@@ -317,9 +320,16 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, money
     }
 
     // --- Pass 2: Buys ---
-    const canBuy = player.money >= MIN_ACCOUNT;
+    // How much of our investLimit is already deployed (cost basis of open positions)
+    const symbols = ns.stock.getSymbols();
+    let currentlyInvested = 0;
+    for (const sym of symbols) {
+        const [shares, avgPx] = ns.stock.getPosition(sym);
+        currentlyInvested += shares * avgPx;
+    }
+    let cashLeft = Math.max(0, investLimit - currentlyInvested);
 
-    if (canBuy) {
+    if (cashLeft > COMMISSION) {
         const buyable = symData
             .filter(d => d.signal === 'buy')
             .filter(d => d.longShares === 0)
