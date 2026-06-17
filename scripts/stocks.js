@@ -268,6 +268,14 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, inves
     let cycleBuys = 0, cycleSells = 0;
     let unrealised = 0, openPositions = 0;
 
+    // Compute available buy budget upfront so Pass 1 sells can credit proceeds into it
+    let currentlyInvested = 0;
+    for (const sym of symbols) {
+        const [shares, avgPx] = ns.stock.getPosition(sym);
+        currentlyInvested += shares * avgPx;
+    }
+    let cashLeft = Math.max(0, investLimit - currentlyInvested);
+
     // --- Pass 1: Sells and unrealised P&L ---
     for (const d of symData) {
         const { sym, bid, forecast, signal } = d;
@@ -320,13 +328,6 @@ function tick(ns, lastPrice, upHistory, cooldown, ownedByUs, lastForecast, inves
     }
 
     // --- Pass 2: Buys ---
-    // How much of our investLimit is already deployed (cost basis of open positions)
-    let currentlyInvested = 0;
-    for (const sym of symbols) {
-        const [shares, avgPx] = ns.stock.getPosition(sym);
-        currentlyInvested += shares * avgPx;
-    }
-    let cashLeft = Math.max(0, investLimit - currentlyInvested);
 
     if (cashLeft > COMMISSION) {
         const buyable = symData
