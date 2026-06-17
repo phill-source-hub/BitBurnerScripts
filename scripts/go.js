@@ -24,6 +24,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.1.0 - Early defend (step 3) now requires enemy adjacency — prevents wasting
+ *            moves defending groups that face no actual threat. Fixes regression
+ *            vs Netburners where early defend fired on every stone in open play.
  *   v3.0.0 - Defend at ≤2 liberties (not just ≤1) to counter TBH surround combos.
  *            moveScore now uses liberties grid: +7 for putting enemy in atari,
  *            +3 for threatening atari, -6 penalty for isolated exposed moves.
@@ -47,7 +50,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.0.0';
+const VERSION       = '3.1.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -186,8 +189,9 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     const defend1 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 1);
     if (defend1) return defend1;
 
-    // --- 3. Defend early: extend our group at ≤2 libs before TBH reduces to atari ---
-    const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2);
+    // --- 3. Defend early: extend our group at ≤2 libs, but ONLY when an enemy stone
+    //        is already adjacent — no point defending groups under no actual pressure ---
+    const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
     // --- 4. Expand: score all valid moves ---
@@ -214,13 +218,16 @@ function pickMove(board, validMoves, liberties, controlled, size) {
  * Find the best liberty to fill for any group of `color` at exactly `threshold` (or fewer) liberties.
  * When multiple candidates exist, picks the one giving the most empty breathing room.
  *
- * threshold=1 → capture/defend (group has 1 lib left — immediate action needed)
- * threshold=2 → early defend (group has 2 libs — prevent TBH's surround-to-atari next turn)
+ * threshold=1      → capture/defend (group has 1 lib left — immediate action needed)
+ * threshold=2      → early defend (group has 2 libs — prevent TBH's surround-to-atari next turn)
+ * requirePressure  → when true, only act if an enemy stone is already adjacent to the group;
+ *                    prevents wasting moves defending groups that face no actual threat
  */
-function findGroupAtLiberties(board, validMoves, liberties, size, color, threshold) {
+function findGroupAtLiberties(board, validMoves, liberties, size, color, threshold, requirePressure = false) {
     const visited = new Set();
     let bestMove  = null;
     let bestScore = -Infinity;
+    const enemy   = color === 'X' ? 'O' : 'X';
 
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
@@ -230,9 +237,10 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
             if (visited.has(key)) continue;
 
             // Flood-fill the connected group
-            const queue  = [{ x, y }];
-            const group  = [];
-            const libSet = new Map();
+            const queue          = [{ x, y }];
+            const group          = [];
+            const libSet         = new Map();
+            let   hasEnemyAdjacent = false;
 
             while (queue.length > 0) {
                 const curr = queue.pop();
@@ -247,6 +255,8 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
                         libSet.set(adj.x + ',' + adj.y, adj);
                     } else if (cell === color) {
                         queue.push(adj);
+                    } else if (cell === enemy) {
+                        hasEnemyAdjacent = true;
                     }
                 }
             }
@@ -254,6 +264,9 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
             // Engine must confirm at least one stone in this group is at risk
             const groupAtRisk = group.some(s => liberties[s.x] && liberties[s.x][s.y] <= threshold);
             if (!groupAtRisk) continue;
+
+            // When requirePressure is set, skip groups with no adjacent enemy — no real threat yet
+            if (requirePressure && !hasEnemyAdjacent) continue;
 
             // For threshold=1: group has exactly 1 liberty (immediate capture/defend)
             // For threshold=2: group may have 1 or 2 liberties
