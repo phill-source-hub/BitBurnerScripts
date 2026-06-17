@@ -40,6 +40,8 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.18.0 - PHISH EXEC FAILED diagnostic: log actual phishRam × threads vs freeRam.
+ *            Also report dnet-phish.js RAM in dnet-ram-check.js.
  *   v1.17.0 - ns.ramOverride(15): calculated cost is 16.30 GB but darkweb hard-cap is
  *            16 GB; override to 15 GB so exec succeeds. Runtime behaviour unchanged —
  *            BB only enforces declared RAM at exec time, not during execution.
@@ -189,7 +191,7 @@ let canExecSelf = false;
 /** @param {NS} ns */
 export async function main(ns) {
     ns.ramOverride(15);                                                              // Calculated cost is 16.30 GB but darkweb cap is 16 GB; override to fit
-    ns.tprint('=== dnet-orchestrate.js v1.17.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.18.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -206,7 +208,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.17.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.18.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -811,9 +813,10 @@ async function ensurePhish(ns, host, prevPid, stasisFull) {
         return 0;
     }
 
+    const phishRam = ns.getScriptRam(PHISH_SCRIPT, 'home');
     const pid = ns.exec(PHISH_SCRIPT, host, threads);
     if (pid === 0) {
-        log(ns, 'PHISH EXEC FAILED ' + host);
+        log(ns, 'PHISH EXEC FAILED ' + host + ' — t=' + threads + ' × ' + phishRam.toFixed(2) + ' GB = ' + (threads * phishRam).toFixed(2) + ' need, ' + freeRam.toFixed(2) + ' free');
         return 0;
     }
 
