@@ -146,7 +146,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.22.0';
+const VERSION       = '3.22.1';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -297,35 +297,52 @@ function interpretResult(state) {
 // Opening anchor
 // =============================================================================
 
-const ANCHOR_STONES = 2;    // two seeds in opposite quadrants — forces opponent to defend two fronts
+const ANCHOR_STONES = 3;    // connected center opening; enough presence for MCTS to extend
 
 /**
- * Opening book: play two seed stones in opposite quadrants of the board.
+ * Opening book: build a 3-stone connected group near center.
  *
- * Move 1 (moveNum=0): closest valid cell to upper-left target with ≥2 liberties.
- * Move 2 (moveNum=1): closest valid cell to lower-right target with ≥2 liberties.
+ * Move 1: closest valid cell to center with ≥3 liberties.
+ * Move 2-3: extend from existing X stones by best liberty+edge score (≥2 libs).
  *
- * Two isolated seeds are harder to simultaneously capture than one center cluster.
- * MCTS (with biased rollouts) then extends both seeds while contesting territory.
- * Target positions scale with board size so this works for 7x7, 9x9, 13x13.
+ * Connected group is harder to capture than isolated seeds (shared liberties).
+ * MCTS + biased rollouts then extend and defend while contesting territory.
  */
 function findAnchorMove(board, validMoves, size, moveNum) {
-    const targets = [
-        { x: Math.round(size * 0.25), y: Math.round(size * 0.75) },  // upper-left quadrant
-        { x: Math.round(size * 0.75), y: Math.round(size * 0.25) },  // lower-right quadrant
-    ];
-    const target = targets[moveNum] || targets[0];
+    const xStones = [];
+    for (let x = 0; x < size; x++)
+        for (let y = 0; y < size; y++)
+            if (board[x] && board[x][y] === 'X') xStones.push({ x, y });
 
-    let best = null, bestDist = Infinity;
-    for (let x = 0; x < size; x++) {
-        for (let y = 0; y < size; y++) {
-            if (!validMoves[x] || !validMoves[x][y]) continue;
-            const libs = getAdjacent(x, y, size).filter(
-                n => board[n.x] && board[n.x][n.y] === '.'
+    const cx = (size - 1) / 2;
+    const cy = (size - 1) / 2;
+
+    if (xStones.length === 0) {
+        let best = null, bestDist = Infinity;
+        for (let x = 0; x < size; x++) {
+            for (let y = 0; y < size; y++) {
+                if (!validMoves[x] || !validMoves[x][y]) continue;
+                const libs = getAdjacent(x, y, size).filter(n => board[n.x] && board[n.x][n.y] === '.').length;
+                if (libs < 3) continue;
+                const dist = Math.abs(x - cx) + Math.abs(y - cy);
+                if (dist < bestDist) { bestDist = dist; best = { x, y }; }
+            }
+        }
+        return best;
+    }
+
+    const xSet = new Set(xStones.map(s => s.x * size + s.y));
+    let best = null, bestScore = -1;
+    for (const stone of xStones) {
+        for (const n of getAdjacent(stone.x, stone.y, size)) {
+            if (!validMoves[n.x] || !validMoves[n.x][n.y]) continue;
+            const candidateLibs = getAdjacent(n.x, n.y, size).filter(
+                a => (board[a.x] && board[a.x][a.y] === '.') || xSet.has(a.x * size + a.y)
             ).length;
-            if (libs < 2) continue;
-            const dist = Math.abs(x - target.x) + Math.abs(y - target.y);
-            if (dist < bestDist) { bestDist = dist; best = { x, y }; }
+            if (candidateLibs < 2) continue;
+            const edgeDist = Math.min(n.x, size - 1 - n.x, n.y, size - 1 - n.y);
+            const score = candidateLibs * 10 + edgeDist;
+            if (score > bestScore) { bestScore = score; best = { x: n.x, y: n.y }; }
         }
     }
     return best;
