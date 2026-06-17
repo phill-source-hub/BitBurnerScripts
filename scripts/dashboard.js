@@ -1,6 +1,6 @@
 /**
  * dashboard.js
- * Version: 1.6.0
+ * Version: 1.7.0
  *
  * Interactive React operations dashboard for PhlanxOS.
  *
@@ -25,7 +25,10 @@
  *     Bladeburner — rank, current action
  *
  * Changelog:
- *   v1.9.0 - Darknet section shows scripts running on darkweb via ns.ps('darkweb').
+ *   v1.7.0 - Darknet proc list covers all darknet hosts (darkweb + cracked servers from port 6),
+ *            not just darkweb. Each row shows actual hostname with LOG/STOP buttons.
+ *   v1.6.0 - Faction section (current faction, rep, favour via singularity API).
+ *   v1.9.0 - (was mislabelled) Darknet section shows scripts running on darkweb via ns.ps('darkweb').
  *            LOG/STOP buttons work by PID-independent script name + host routing.
  *            cmd queue drain extended to support non-home host field.
  *   v1.8.0 - Darknet section: visible/cracked/stasis/instability from dnet API + port 6.
@@ -146,7 +149,7 @@ const INIT_DATA = {
     farmMax: 0, farmUsed: 0, farmCount: 0, farmLimit: 0,
     targets: {}, cycleStart: 0, corpData: null, bbData: null,
     now: Date.now(), income: [0, 0], factionData: null, stockData: null,
-    dnetData: null, darkwebProcs: [],
+    dnetData: null, dnetProcs: [],
 };
 
 // Single shared reference; main() mutates this each poll cycle.
@@ -238,9 +241,20 @@ function collectData(ns) {
         factionData = { name: fac, rep, favour };
     }
 
-    // Scripts running on darkweb — ps() by server, not home; PID changes dynamically
-    let darkwebProcs = [];
-    try { darkwebProcs = ns.ps('darkweb'); } catch (_) {}
+    // Scripts running on all darknet hosts: darkweb + every cracked server from port 6
+    // ps() must be called per-host; PID changes each mutation cycle
+    let dnetProcs = [];
+    try {
+        const p6Raw  = ns.peek(6);
+        const creds  = (p6Raw === 'NULL PORT DATA') ? [] : JSON.parse(p6Raw);
+        const hosts  = ['darkweb', ...creds.map(c => c.host)];
+        for (const h of hosts) {
+            try {
+                const procs = ns.ps(h);
+                for (const proc of procs) dnetProcs.push({ host: h, pid: proc.pid, filename: proc.filename });
+            } catch (_) {}
+        }
+    } catch (_) {}
 
     // Darknet stats — probe() + instability + stasis + port 6 cracked count
     let dnetData = null;
@@ -269,7 +283,7 @@ function collectData(ns) {
         farmMax, farmUsed, farmCount, farmLimit,
         targets, cycleStart, corpData, bbData,
         now: Date.now(), income, factionData, stockData,
-        dnetData, darkwebProcs,
+        dnetData, dnetProcs,
     };
 }
 
@@ -651,17 +665,17 @@ function renderDarknet(d) {
     var instabCol = dn.instability > 2.0 ? C.red : dn.instability > 1.2 ? C.yellow : C.green;
     var stasisCol = dn.stasisUsed >= dn.stasisLimit ? C.yellow : C.cyan;
 
-    // Rows for scripts running on darkweb — PID-dynamic, found via ps()
-    var procRows = (d.darkwebProcs || []).map(function(proc) {
+    // Rows for scripts running on all darknet hosts — PID-dynamic, found via ps() per host
+    var procRows = (d.dnetProcs || []).map(function(proc) {
         var shortName = proc.filename.replace('/scripts/', '');
-        var onLog  = function() { cmdQueue.push({ action: 'tail', script: proc.filename, host: 'darkweb' }); };
-        var onStop = function() { cmdQueue.push({ action: 'kill', script: proc.filename, host: 'darkweb' }); };
+        var onLog  = function() { cmdQueue.push({ action: 'tail', script: proc.filename, host: proc.host }); };
+        var onStop = function() { cmdQueue.push({ action: 'kill', script: proc.filename, host: proc.host }); };
         return e('div', {
-            key: proc.pid,
+            key: proc.host + ':' + proc.pid,
             style: { display: 'flex', alignItems: 'center', gap: '4px', padding: '2px 0', fontSize: '11px' },
         }, [
             e('span', { key: 'dot',  style: { color: C.green, fontSize: '10px' } }, '●'),
-            e('span', { key: 'host', style: { color: C.purple, minWidth: '60px' } }, 'darkweb'),
+            e('span', { key: 'host', style: { color: C.purple, minWidth: '80px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, proc.host),
             e('span', { key: 'name', style: { flex: 1, color: C.text } }, shortName),
             e('span', { key: 'pid',  style: { color: C.dim, fontSize: '10px', marginRight: '4px' } }, 'pid:' + proc.pid),
             e('button', { key: 'log',  onClick: onLog,  style: Object.assign({}, btnStyle(C.dim), { marginRight: '3px' }) }, 'LOG'),
