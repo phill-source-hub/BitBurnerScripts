@@ -146,7 +146,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.22.1';
+const VERSION       = '3.22.2';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -689,9 +689,9 @@ function _groupLibs(arr, idx, size, t) {
     return libs.size;
 }
 
-const MCTS_CANDIDATES = 8;    // top-N moves by combined score to simulate
-const MCTS_ROLLOUTS   = 100;  // random rollouts per candidate (↑ from 40 — tighter CI)
-const MCTS_DEPTH      = 40;   // max plies per rollout (↑ from 20 — reaches near-endgame)
+const MCTS_CANDIDATES = 12;   // top-N moves by combined score to simulate (↑ from 8)
+const MCTS_ROLLOUTS   = 150;  // rollouts per candidate (↑ from 100 — tighter win-rate CI)
+const MCTS_DEPTH      = 40;   // max plies per rollout
 const TERR_WEIGHT     = 2;    // territory-gain bonus multiplier in candidate pre-scoring
 
 /** Precomputed flat adjacency lists keyed by board size. */
