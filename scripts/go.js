@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.17.0
+ * Version: 3.17.1
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -12,6 +12,7 @@
  *     1.   Capture:      fill the last liberty of any enemy group
  *     2.   Defend:       fill the last liberty of any of our groups
  *     3.   Defend early: fill liberty of our group at <=2 libs (enemy adjacent)
+ *     3.5. Anchor:       first 3 moves build connected group near center (≥3 libs)
  *     4.   MCTS:         rank top-N by territory-aware heuristic via rollouts
  *     5.   Pass:         no valid moves remain (game engine ends naturally)
  *
@@ -23,6 +24,10 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.17.1 - Opening anchor (step 3.5): first 3 moves build connected group near
+ *             center before MCTS territory contest. Move 1 = closest valid cell to
+ *             center with ≥3 libs. Move 2-3 = best adjacent extension by liberty count.
+ *             Prevents X=0 losses caused by isolated early stones being surrounded.
  *   v3.17.0 - Revert to v3.16.3 strategy (MCTS + original heuristic weights).
  *             v3.16.7–9 changes (≤1 lib filter, X×8 bonus, no-MCTS) all degraded
  *             performance. Code comment explicitly warns X>+2 degrades SS win rate.
@@ -117,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.17.0';
+const VERSION       = '3.17.1';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -263,6 +268,70 @@ function interpretResult(state) {
 
 
 // =============================================================================
+// Opening anchor
+// =============================================================================
+
+const ANCHOR_STONES = 3;  // build this many connected stones before switching to MCTS
+
+/**
+ * Opening book: build a connected anchor group near center for the first ANCHOR_STONES moves.
+ *
+ * Move 1 (no X on board): pick valid cell closest to center with ≥3 liberties.
+ * Move 2-N (X exists, group < ANCHOR_STONES): pick valid cell adjacent to our group
+ *   with the highest post-placement liberty count for the resulting group (≥2 libs).
+ * Returns null once we have ANCHOR_STONES stones placed (MCTS takes over).
+ */
+function findAnchorMove(board, validMoves, size) {
+    // Count X stones and collect their positions
+    const xStones = [];
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            if (board[x] && board[x][y] === 'X') xStones.push({ x, y });
+        }
+    }
+
+    if (xStones.length >= ANCHOR_STONES) return null;  // anchor done, let MCTS take over
+
+    const cx = (size - 1) / 2;
+    const cy = (size - 1) / 2;
+
+    if (xStones.length === 0) {
+        // Move 1: closest valid cell to center with ≥3 liberties
+        let best = null, bestDist = Infinity;
+        for (let x = 0; x < size; x++) {
+            for (let y = 0; y < size; y++) {
+                if (!validMoves[x] || !validMoves[x][y]) continue;
+                const libs = getAdjacent(x, y, size).filter(
+                    n => board[n.x] && board[n.x][n.y] === '.'
+                ).length;
+                if (libs < 3) continue;
+                const dist = Math.abs(x - cx) + Math.abs(y - cy);
+                if (dist < bestDist) { bestDist = dist; best = { x, y }; }
+            }
+        }
+        return best;
+    }
+
+    // Moves 2-N: extend our existing group — pick valid adjacent cell with most resulting libs
+    const xSet = new Set(xStones.map(s => s.x * size + s.y));
+    let best = null, bestLibs = -1;
+    for (const stone of xStones) {
+        for (const n of getAdjacent(stone.x, stone.y, size)) {
+            if (!validMoves[n.x] || !validMoves[n.x][n.y]) continue;
+            // Count how many empty cells are adjacent to the candidate (future group libs)
+            const candidateLibs = getAdjacent(n.x, n.y, size).filter(
+                a => (board[a.x] && board[a.x][a.y] === '.') ||
+                     xSet.has(a.x * size + a.y)
+            ).length;
+            if (candidateLibs < 2) continue;
+            if (candidateLibs > bestLibs) { bestLibs = candidateLibs; best = { x: n.x, y: n.y }; }
+        }
+    }
+    return best;
+}
+
+
+// =============================================================================
 // Move selection
 // =============================================================================
 
@@ -287,6 +356,12 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     //        is already adjacent — no point defending groups under no actual pressure ---
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
+
+    // --- 3.5. Opening anchor: first 3 moves build a connected group near center.
+    //     Move 1: closest valid cell to center with ≥3 liberties.
+    //     Move 2-3: valid cell adjacent to our group, highest post-placement liberty count. ---
+    const anchor = findAnchorMove(board, validMoves, size);
+    if (anchor) return anchor;
 
     // --- 4. Territory-scored MCTS: candidates ranked by heuristic + territory gain,
     //        then final selection via Monte Carlo rollouts. ---
