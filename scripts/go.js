@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.17.9';
+const VERSION       = '3.18.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -363,8 +363,8 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
         return anchor;
     }
 
-    // --- 4. Defend early: extend our group at ≤2 libs when under pressure ---
-    const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
+    // --- 4. Defend early: extend our group at ≤3 libs when under pressure ---
+    const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 3, true);
     if (defend2) return defend2;
 
     // --- 5. Territory-scored MCTS: candidates ranked by heuristic + territory gain,
@@ -372,16 +372,6 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
     const t      = _adj(size);
     const flat   = _toFlat(board, size);
     const baseXs = _score(flat, t).xs;  // our territory before any move (shared baseline)
-
-    // Build candidate set, flagging cells adjacent to our existing group
-    const xAdjSet = new Set();
-    for (let x = 0; x < size; x++) {
-        for (let y = 0; y < size; y++) {
-            if (board[x] && board[x][y] === 'X') {
-                for (const n of getAdjacent(x, y, size)) xAdjSet.add(n.x * size + n.y);
-            }
-        }
-    }
 
     const candidates = [];
     for (let x = 0; x < size; x++) {
@@ -391,17 +381,14 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
             const after = _applyMove(flat, idx, 1, t);
             const terr  = after ? Math.max(0, _score(after, t).xs - baseXs) : 0;
             const h     = moveScore(board, controlled, x, y, size) + TERR_WEIGHT * terr;
-            candidates.push({ x, y, idx, h, adj: xAdjSet.has(idx) });
+            candidates.push({ x, y, idx, h });
         }
     }
 
     if (candidates.length === 0) return null;
 
     candidates.sort((a, b) => b.h - a.h);
-    // Prefer connected plays (adjacent to our group); fall back to all candidates if none exist
-    const connected = candidates.filter(c => c.adj);
-    const pool = connected.length > 0 ? connected : candidates;
-    const top = pool.slice(0, Math.min(MCTS_CANDIDATES, pool.length));
+    const top = candidates.slice(0, Math.min(MCTS_CANDIDATES, candidates.length));
 
     let bestMove = top[0];
     let bestRate = -1;
