@@ -24,6 +24,10 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.3.0 - Chain growth: getLargestChainId() from getChains(); moves adjacent to
+ *            our largest connected group score +3 extra, mirroring Slum Snakes'
+ *            growth() priority. Helps build one strong group vs both chain-growth
+ *            and surround-based opponents.
  *   v3.2.0 - Revert moveScore to v2.0.0 simplicity — atari bonuses (+7/+3) and
  *            isolation penalty were causing territory-chasing behaviour that hurt
  *            win rate vs passive opponents. Structural defend-at-2-libs step
@@ -54,7 +58,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.2.0';
+const VERSION       = '3.3.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -148,7 +152,8 @@ async function playGame(ns, boardSize) {
         const validMoves = ns.go.analysis.getValidMoves();
         const liberties  = ns.go.analysis.getLiberties();
         const controlled = ns.go.analysis.getControlledEmptyNodes();
-        const move       = pickMove(board, validMoves, liberties, controlled, boardSize);
+        const chains     = ns.go.analysis.getChains();
+        const move       = pickMove(board, validMoves, liberties, controlled, chains, boardSize);
 
         try {
             if (move) {
@@ -183,8 +188,9 @@ function interpretResult(state) {
  * validMoves — boolean[][] from getValidMoves(). validMoves[x][y] = true if legal
  * liberties  — number[][] from getLiberties(). liberties[x][y] = count for stone, -1 for empty/dead
  * controlled — string[] from getControlledEmptyNodes(). controlled[x][y] = 'X'/'O'/'?'/'#'
+ * chains     — (number|null)[][] from getChains(). chains[x][y] = chain ID or null
  */
-function pickMove(board, validMoves, liberties, controlled, size) {
+function pickMove(board, validMoves, liberties, controlled, chains, size) {
     // --- 1. Capture: fill last liberty of an enemy group ---
     const capture = findGroupAtLiberties(board, validMoves, liberties, size, 'O', 1);
     if (capture) return capture;
@@ -198,12 +204,15 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
+    // Pre-compute largest friendly chain ID — moves that extend it score higher
+    const largestChainId = getLargestChainId(board, chains, size);
+
     // --- 4. Expand: score all valid moves ---
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
+            candidates.push({ x, y, score: moveScore(board, controlled, chains, largestChainId, x, y, size) });
         }
     }
 
@@ -301,11 +310,12 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
  * Score a candidate move. Higher = better.
  *
  * Factors:
- * - Positional:  3rd-line positions preferred (ideal = floor(size/4))
- * - Territory:   adjacent contested ('?') +3, enemy-controlled +4, ours +1
- * - Connectivity: adjacent to our stones +2 each
+ * - Positional:    3rd-line positions preferred (ideal = floor(size/4))
+ * - Territory:     adjacent contested ('?') +3, enemy-controlled +4, ours +1
+ * - Connectivity:  adjacent to our stones +2 each
+ * - Chain growth:  +3 if adjacent to a stone in our largest chain (mirrors growth() priority)
  */
-function moveScore(board, controlled, x, y, size) {
+function moveScore(board, controlled, chains, largestChainId, x, y, size) {
     let score = positionalScore(x, y, size);
 
     for (const n of getAdjacent(x, y, size)) {
@@ -317,10 +327,34 @@ function moveScore(board, controlled, x, y, size) {
             if (ctrl === 'O') score += 4;
             if (ctrl === 'X') score += 1;
         }
-        if (cell === 'X') score += 2;
+        if (cell === 'X') {
+            score += 2;
+            if (largestChainId !== null && chains[n.x] && chains[n.x][n.y] === largestChainId) {
+                score += 3;                                                          // Extend largest chain — mirrors Slum Snakes growth() priority
+            }
+        }
     }
 
     return score;
+}
+
+/**
+ * Returns the chain ID (from getChains()) of our largest connected group of stones,
+ * or null if we have no stones on the board yet.
+ */
+function getLargestChainId(board, chains, size) {
+    const sizes = {};
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            if (!board[x] || board[x][y] !== 'X') continue;
+            const id = chains[x] && chains[x][y];
+            if (id === null || id === undefined) continue;
+            sizes[id] = (sizes[id] || 0) + 1;
+        }
+    }
+    const entries = Object.entries(sizes);
+    if (entries.length === 0) return null;
+    return entries.reduce((best, e) => (e[1] > best[1] ? e : best))[0];
 }
 
 /**
