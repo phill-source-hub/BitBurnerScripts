@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.17.3';
+const VERSION       = '3.17.4';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -241,7 +241,7 @@ async function playGame(ns, boardSize) {
         const liberties  = ns.go.analysis.getLiberties();
         const controlled = ns.go.analysis.getControlledEmptyNodes();
 
-        const move       = pickMove(board, validMoves, liberties, controlled, boardSize);
+        const move       = pickMove(ns, board, validMoves, liberties, controlled, boardSize);
 
         try {
             if (move) {
@@ -272,7 +272,7 @@ function interpretResult(state) {
 // Opening anchor
 // =============================================================================
 
-const ANCHOR_STONES = 3;  // build this many connected stones before switching to MCTS
+const ANCHOR_STONES = 5;  // build this many connected stones before switching to MCTS
 
 /**
  * Opening book: build a connected anchor group near center for the first ANCHOR_STONES moves.
@@ -344,7 +344,17 @@ function findAnchorMove(board, validMoves, size) {
  * liberties  — number[][] from getLiberties(). liberties[x][y] = count for stone, -1 for empty/dead
  * controlled — string[] from getControlledEmptyNodes(). controlled[x][y] = 'X'/'O'/'?'/'#'
  */
-function pickMove(board, validMoves, liberties, controlled, size) {
+function pickMove(ns, board, validMoves, liberties, controlled, size) {
+    // --- 0. Opening anchor: first ANCHOR_STONES moves build a connected group near center,
+    //     BEFORE capture/defend so early-game defend heuristics can't interrupt the anchor.
+    //     Move 1: closest valid cell to center with ≥3 liberties.
+    //     Move 2-N: valid cell adjacent to our group, highest post-placement liberty count. ---
+    const anchor = findAnchorMove(board, validMoves, size);
+    if (anchor) {
+        ns.print('[GO] anchor → (' + anchor.x + ',' + anchor.y + ')');
+        return anchor;
+    }
+
     // --- 1. Capture: fill last liberty of an enemy group ---
     const capture = findGroupAtLiberties(board, validMoves, liberties, size, 'O', 1);
     if (capture) return capture;
@@ -357,12 +367,6 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     //        is already adjacent — no point defending groups under no actual pressure ---
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
-
-    // --- 3.5. Opening anchor: first 3 moves build a connected group near center.
-    //     Move 1: closest valid cell to center with ≥3 liberties.
-    //     Move 2-3: valid cell adjacent to our group, highest post-placement liberty count. ---
-    const anchor = findAnchorMove(board, validMoves, size);
-    if (anchor) return anchor;
 
     // --- 4. Territory-scored MCTS: candidates ranked by heuristic + territory gain,
     //        then final selection via Monte Carlo rollouts. ---
