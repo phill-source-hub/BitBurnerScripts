@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.12.0
+ * Version: 3.13.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -72,7 +72,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.12.0';
+const VERSION       = '3.13.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -117,7 +117,7 @@ export async function main(ns) {
 
         ns.print('[GO] New game vs ' + opponent + ' (' + flags.size + 'x' + flags.size + ')');
 
-        const result = await playGame(ns, flags.size, opponent);
+        const result = await playGame(ns, flags.size);
 
         if (result === 'win') {
             totalWins++;
@@ -143,7 +143,7 @@ export async function main(ns) {
 // Game loop
 // =============================================================================
 
-async function playGame(ns, boardSize, opponent) {
+async function playGame(ns, boardSize) {
     while (true) {
         let state;
         try {
@@ -166,7 +166,7 @@ async function playGame(ns, boardSize, opponent) {
         const validMoves = ns.go.analysis.getValidMoves();
         const liberties  = ns.go.analysis.getLiberties();
         const controlled = ns.go.analysis.getControlledEmptyNodes();
-        const move       = pickMove(board, validMoves, liberties, controlled, boardSize, opponent);
+        const move       = pickMove(board, validMoves, liberties, controlled, boardSize);
 
         try {
             if (move) {
@@ -202,7 +202,7 @@ function interpretResult(state) {
  * liberties  — number[][] from getLiberties(). liberties[x][y] = count for stone, -1 for empty/dead
  * controlled — string[] from getControlledEmptyNodes(). controlled[x][y] = 'X'/'O'/'?'/'#'
  */
-function pickMove(board, validMoves, liberties, controlled, size, opponent) {
+function pickMove(board, validMoves, liberties, controlled, size) {
     // --- 1. Capture: fill last liberty of an enemy group ---
     const capture = findGroupAtLiberties(board, validMoves, liberties, size, 'O', 1);
     if (capture) return capture;
@@ -216,35 +216,12 @@ function pickMove(board, validMoves, liberties, controlled, size, opponent) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
-    // --- 4. Opening book (Slum Snakes only): race to corner 2nd-line positions before their
-    //        chain grows to reach them. Fires only while the board is still sparse (<8 stones).
-    if (opponent === 'Slum Snakes') {
-        let totalStones = 0;
-        for (let x = 0; x < size; x++) {
-            for (let y = 0; y < size; y++) {
-                if (board[x] && (board[x][y] === 'X' || board[x][y] === 'O')) totalStones++;
-            }
-        }
-        if (totalStones < 8) {
-            const ideal = Math.floor(size / 4);                                     // 1 for 7x7 (2nd-line corner)
-            const corners = [
-                { x: ideal,        y: ideal },
-                { x: size-1-ideal, y: size-1-ideal },
-                { x: ideal,        y: size-1-ideal },
-                { x: size-1-ideal, y: ideal },
-            ];
-            for (const c of corners) {
-                if (validMoves[c.x] && validMoves[c.x][c.y]) return c;
-            }
-        }
-    }
-
-    // --- 5. Expand: score all valid moves ---
+    // --- 4. Expand: score all valid moves ---
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size, opponent) });
+            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
         }
     }
 
@@ -342,38 +319,24 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
  * Score a candidate move. Higher = better.
  *
  * Opponent-aware weights:
- *   Slum Snakes — opening book claims corners first (step 4); scoring must follow through.
- *                 X=+4 strongly extends from our stones (build connected corner regions).
- *                 O=+2 still contests somewhat but won't pull us away from corner extensions.
- *                 Without high X, O=+4 abandons our corner stones to chase SS territory.
- *   All others  — v3.2.0: O=+4 X=+1 ?=+3. Proven ~64% vs Netburners.
+ * v3.2.0 territory weights — proven ~64% vs Netburners, ~37% vs Slum Snakes.
+ * Playing near enemy territory creates boundary walls that limit chain expansion.
+ * All modifications tried (moyo O=-3, neutral O=0, high X=+4, corner opening book)
+ * degraded Slum Snakes below 37% baseline. This is the ceiling for greedy scoring.
  */
-function moveScore(board, controlled, x, y, size, opponent) {
+function moveScore(board, controlled, x, y, size) {
     let score = positionalScore(x, y, size);
-
-    const ss = opponent === 'Slum Snakes';
 
     for (const n of getAdjacent(x, y, size)) {
         const cell = board[n.x] && board[n.x][n.y];
         const ctrl = controlled[n.x] && controlled[n.x][n.y];
 
         if (cell === '.') {
-            if (ctrl === 'X') score += ss ? 4 : 1;
             if (ctrl === '?') score += 3;
-            if (ctrl === 'O') score += ss ? 2 : 4;
+            if (ctrl === 'O') score += 4;
+            if (ctrl === 'X') score += 1;
         }
         if (cell === 'X') score += 2;
-    }
-
-    // Openness: empty cells within Manhattan-2 — mild tiebreaker for open positions.
-    const opennessWeight = 0.2;
-    for (let dx = -2; dx <= 2; dx++) {
-        for (let dy = -2; dy <= 2; dy++) {
-            if (Math.abs(dx) + Math.abs(dy) > 2) continue;
-            const nx = x + dx, ny = y + dy;
-            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
-            if (board[nx] && board[nx][ny] === '.') score += opennessWeight;
-        }
     }
 
     return score;
