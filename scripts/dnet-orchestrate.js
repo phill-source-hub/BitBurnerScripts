@@ -40,6 +40,8 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.19.0 - PHISH_RAM_GB 4→6 (actual dnet-phish.js cost is 5.85 GB; ramOverride
+ *            cannot go below runtime usage — BB checks dynamically per-function call).
  *   v1.18.0 - PHISH EXEC FAILED diagnostic: log actual phishRam × threads vs freeRam.
  *            Also report dnet-phish.js RAM in dnet-ram-check.js.
  *   v1.17.0 - ns.ramOverride(15): calculated cost is 16.30 GB but darkweb hard-cap is
@@ -143,7 +145,7 @@ const PHISH_SCRIPT       = '/scripts/dnet-phish.js';                            
 const STASIS_SCRIPT      = '/scripts/dnet-stasis-set.js';                           // One-shot worker exec'd onto target to apply stasis link
 const LIB_UTILS          = '/scripts/lib-utils.js';                                 // Required by dnet-phish.js on remote server
 const STASIS_RAM_GB      = 12;                                                      // GB required on target to run dnet-stasis-set.js
-const PHISH_RAM_GB       = 4;                                                       // GB per thread for dnet-phish.js (2 phish + 2 openCache)
+const PHISH_RAM_GB       = 6;                                                       // GB per thread for dnet-phish.js (actual=5.85 GB; rounded up)
 const AUTO_CRACK_MAX_LEN = 4;                                                       // Only brute-force numeric passwords up to this length (10K max)
 const RATE_LIMIT_SLEEP_MS  = 2000;                                                  // Pause after rate-limit or timeout response from authenticate
 const CYCLE_SLEEP_MS       = 200;                                                   // Minimum yield per loop iteration to avoid engine lockup
@@ -191,7 +193,7 @@ let canExecSelf = false;
 /** @param {NS} ns */
 export async function main(ns) {
     ns.ramOverride(15);                                                              // Calculated cost is 16.30 GB but darkweb cap is 16 GB; override to fit
-    ns.tprint('=== dnet-orchestrate.js v1.18.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.19.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -208,7 +210,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.18.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.19.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host

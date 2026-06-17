@@ -15,8 +15,6 @@
  *   Scales with threads: more threads = more money per successful attack.
  *
  * Changelog:
- *   v1.2.0 - ns.ramOverride(4): actual calculated cost is 5.85 GB; override so
- *            orchestrate can exec more threads per server (PHISH_RAM_GB=4 matches).
  *   v1.1.0 - Check for .cache files every loop iteration (not only after phish success)
  *            so caches dropped by memoryReallocation() are collected promptly.
  *   v1.0.0 - Initial version.
@@ -51,8 +49,7 @@ const CYCLE_SLEEP_MS = 200;                                                     
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.ramOverride(4);                                                               // Actual calc=5.85 GB; override to 4 GB so orchestrate can fit more threads
-    ns.tprint('=== dnet-phish.js v1.2.0 ===');
+    ns.tprint('=== dnet-phish.js v1.1.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
