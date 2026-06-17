@@ -25,6 +25,12 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.15.0 - Territory completion scoring + improved MCTS.
+ *             B: add TERR_WEIGHT * territoryGain to heuristic before top-8 filter.
+ *             territoryGain = flood-fill delta (_score after move minus before).
+ *             Deterministic; directly rewards moves that enclose empty space.
+ *             A: MCTS_DEPTH 20→40, MCTS_ROLLOUTS 40→100 — deeper & less noisy.
+ *             v3.14.0 MCTS-only dropped to 17% vs SS (too shallow, too few rollouts).
  *   v3.14.0 - Replace greedy expand step with MCTS (Monte Carlo Tree Search):
  *             top-8 candidates by heuristic score each get MCTS_ROLLOUTS random
  *             simulations; pick highest win rate. Pure JS board ops on Uint8Array
@@ -80,7 +86,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.14.0';
+const VERSION       = '3.15.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -224,12 +230,22 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
-    // --- 4. MCTS: rank top-N heuristic candidates via Monte Carlo rollouts ---
+    // --- 4. Territory-scored MCTS: candidates ranked by heuristic + territory gain,
+    //        then final selection via Monte Carlo rollouts. ---
+    const t      = _adj(size);
+    const flat   = _toFlat(board, size);
+    const baseXs = _score(flat, t).xs;  // our territory before any move (shared baseline)
+
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, h: moveScore(board, controlled, x, y, size) });
+            const idx   = x * size + y;
+            const after = _applyMove(flat, idx, 1, t);
+            // Territory gain: how many more X-controlled points after this move
+            const terr  = after ? Math.max(0, _score(after, t).xs - baseXs) : 0;
+            const h     = moveScore(board, controlled, x, y, size) + TERR_WEIGHT * terr;
+            candidates.push({ x, y, idx, h });
         }
     }
 
@@ -237,14 +253,12 @@ function pickMove(board, validMoves, liberties, controlled, size) {
 
     candidates.sort((a, b) => b.h - a.h);
     const top  = candidates.slice(0, Math.min(MCTS_CANDIDATES, candidates.length));
-    const t    = _adj(size);
-    const flat = _toFlat(board, size);
 
     let bestMove = top[0];
     let bestRate = -1;
 
     for (const cand of top) {
-        const after = _applyMove(flat, cand.x * size + cand.y, 1, t);
+        const after = _applyMove(flat, cand.idx, 1, t);
         if (!after) continue;
         let wins = 0;
         for (let r = 0; r < MCTS_ROLLOUTS; r++) {
@@ -392,9 +406,10 @@ function getAdjacent(x, y, size) {
 // Color encoding: 0=empty, 1=X(us/Black), 2=O(enemy/White), 3=dead('#').
 // =============================================================================
 
-const MCTS_CANDIDATES = 8;   // top-N moves by heuristic to simulate
-const MCTS_ROLLOUTS   = 40;  // random rollouts per candidate
-const MCTS_DEPTH      = 20;  // max plies per rollout
+const MCTS_CANDIDATES = 8;    // top-N moves by combined score to simulate
+const MCTS_ROLLOUTS   = 100;  // random rollouts per candidate (↑ from 40 — tighter CI)
+const MCTS_DEPTH      = 40;   // max plies per rollout (↑ from 20 — reaches near-endgame)
+const TERR_WEIGHT     = 2;    // territory-gain bonus multiplier in candidate pre-scoring
 
 /** Precomputed flat adjacency lists keyed by board size. */
 const _adjCache = {};
