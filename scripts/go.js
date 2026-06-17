@@ -24,6 +24,10 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.6.0 - Replace own-chain-grow step with enemy-chain-interdict step: play at the
+ *            best liberty of the enemy's largest chain (blocks growth() AIs without
+ *            abandoning territory). Revert moveScore to pure v3.2.0 (no chain bonus).
+ *            Own-chain-grow gave 50% vs Netburners (down from 64%); interdict tested next.
  *   v3.5.0 - Add findChainLiberty() as dedicated step 4: always extend our largest
  *            chain (mirrors Slum Snakes' growth() exactly) before territory expand.
  *            Revert positional to 2nd-line (floor(size/4)) — 3rd-line made it worse.
@@ -64,7 +68,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.5.0';
+const VERSION       = '3.6.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -210,23 +214,24 @@ function pickMove(board, validMoves, liberties, controlled, chains, size) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
-    // Pre-compute largest friendly chain ID — used in step 4 and moveScore
-    const largestChainId = getLargestChainId(board, chains, size);
+    // Pre-compute chain IDs for scoring
+    const largestChainId      = getLargestChainId(board, chains, size, 'X');
+    const enemyLargestChainId = getLargestChainId(board, chains, size, 'O');
 
-    // --- 4. Grow our largest chain — mirrors Slum Snakes' growth() strategy ---
-    //        Best liberty of our largest chain, scored by future empty neighbours.
-    //        Always prefer extending our strongest group over chasing raw territory.
-    if (largestChainId !== null) {
-        const grow = findChainLiberty(board, validMoves, chains, largestChainId, size);
-        if (grow) return grow;
+    // --- 4. Interdict enemy chain — play at the best open liberty of their largest group.
+    //        This blocks growth() AIs (Netburners, Slum Snakes) from extending their chain
+    //        while simultaneously placing us in good territory. ---
+    if (enemyLargestChainId !== null) {
+        const interdict = findChainLiberty(board, validMoves, chains, enemyLargestChainId, size);
+        if (interdict) return interdict;
     }
 
-    // --- 5. Expand: score all valid moves when no chain liberty exists ---
+    // --- 5. Expand: score all valid moves ---
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, score: moveScore(board, controlled, chains, largestChainId, x, y, size) });
+            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
         }
     }
 
@@ -329,7 +334,7 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
  * - Connectivity:  adjacent to our stones +2 each
  * - Chain growth:  +3 if adjacent to a stone in our largest chain (mirrors growth() priority)
  */
-function moveScore(board, controlled, chains, largestChainId, x, y, size) {
+function moveScore(board, controlled, x, y, size) {
     let score = positionalScore(x, y, size);
 
     for (const n of getAdjacent(x, y, size)) {
@@ -341,12 +346,7 @@ function moveScore(board, controlled, chains, largestChainId, x, y, size) {
             if (ctrl === 'O') score += 4;
             if (ctrl === 'X') score += 1;
         }
-        if (cell === 'X') {
-            score += 2;
-            if (largestChainId !== null && chains[n.x] && chains[n.x][n.y] === largestChainId) {
-                score += 3;                                                          // Small bonus for chain adjacency in fallback expand step
-            }
-        }
+        if (cell === 'X') score += 2;
     }
 
     return score;
@@ -384,11 +384,11 @@ function findChainLiberty(board, validMoves, chains, largestChainId, size) {
  * Returns the chain ID (from getChains()) of our largest connected group of stones,
  * or null if we have no stones on the board yet.
  */
-function getLargestChainId(board, chains, size) {
+function getLargestChainId(board, chains, size, color = 'X') {
     const sizes = {};
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
-            if (!board[x] || board[x][y] !== 'X') continue;
+            if (!board[x] || board[x][y] !== color) continue;
             const id = chains[x] && chains[x][y];
             if (id === null || id === undefined) continue;
             sizes[id] = (sizes[id] || 0) + 1;
