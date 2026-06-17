@@ -24,6 +24,10 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.2.0 - Revert moveScore to v2.0.0 simplicity — atari bonuses (+7/+3) and
+ *            isolation penalty were causing territory-chasing behaviour that hurt
+ *            win rate vs passive opponents. Structural defend-at-2-libs step
+ *            (with requirePressure) retained as the TBH counter-measure.
  *   v3.1.0 - Early defend (step 3) now requires enemy adjacency — prevents wasting
  *            moves defending groups that face no actual threat. Fixes regression
  *            vs Netburners where early defend fired on every stone in open play.
@@ -50,7 +54,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.1.0';
+const VERSION       = '3.2.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -199,7 +203,7 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, score: moveScore(board, liberties, controlled, x, y, size) });
+            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
         }
     }
 
@@ -296,49 +300,24 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
 /**
  * Score a candidate move. Higher = better.
  *
- * Factors (in rough order of weight):
- * - Atari threat:   +7 if reduces enemy group to 1 lib (we can capture next turn)
- * - Extend ally:    +4 if adjacent to our group at ≤2 libs (stabilises threatened group)
- * - Threaten:       +3 if reduces enemy group to 2 libs (threatens atari in 2 moves)
- * - Connectivity:   +2 per adjacent friendly stone
- * - Territory:      +3 adjacent enemy-controlled empty, +2 contested, +1 ours
- * - Positional:     3rd-line positions preferred (ideal = floor(size/4))
- * - Isolation:      -6 for no friendly neighbors AND ≤2 empty neighbors (TBH magnets)
+ * Factors:
+ * - Positional:  3rd-line positions preferred (ideal = floor(size/4))
+ * - Territory:   adjacent contested ('?') +3, enemy-controlled +4, ours +1
+ * - Connectivity: adjacent to our stones +2 each
  */
-function moveScore(board, liberties, controlled, x, y, size) {
+function moveScore(board, controlled, x, y, size) {
     let score = positionalScore(x, y, size);
 
-    const adj = getAdjacent(x, y, size);
-
-    const emptyNeighbors    = adj.filter(n => board[n.x] && board[n.x][n.y] === '.').length;
-    const friendlyNeighbors = adj.filter(n => board[n.x] && board[n.x][n.y] === 'X').length;
-
-    // Isolated stones on an open board are trivially surrounded by TBH
-    if (friendlyNeighbors === 0 && emptyNeighbors <= 2) score -= 6;
-    else if (friendlyNeighbors === 0 && emptyNeighbors === 3) score -= 2;
-
-    for (const n of adj) {
+    for (const n of getAdjacent(x, y, size)) {
         const cell = board[n.x] && board[n.x][n.y];
         const ctrl = controlled[n.x] && controlled[n.x][n.y];
-        const lib  = liberties[n.x] ? liberties[n.x][n.y] : -1;
 
         if (cell === '.') {
-            if (ctrl === '?') score += 2;
-            if (ctrl === 'O') score += 3;
+            if (ctrl === '?') score += 3;
+            if (ctrl === 'O') score += 4;
             if (ctrl === 'X') score += 1;
         }
-
-        if (cell === 'X') {
-            score += 2;                              // Connectivity
-            if (lib > 0 && lib <= 2) score += 4;   // Extending a threatened group
-        }
-
-        if (cell === 'O') {
-            // Reducing enemy liberties — key against TBH's methodical surround strategy
-            if (lib === 2) score += 7;              // Puts them in atari (1 lib left)
-            else if (lib === 3) score += 3;         // Threatens atari next move
-            else if (lib > 0 && lib <= 5) score += 1;
-        }
+        if (cell === 'X') score += 2;
     }
 
     return score;
