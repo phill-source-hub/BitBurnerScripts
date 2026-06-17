@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.0.0
+ * Version: 3.8.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -166,8 +166,7 @@ async function playGame(ns, boardSize) {
         const validMoves = ns.go.analysis.getValidMoves();
         const liberties  = ns.go.analysis.getLiberties();
         const controlled = ns.go.analysis.getControlledEmptyNodes();
-        const chains     = ns.go.analysis.getChains();
-        const move       = pickMove(board, validMoves, liberties, controlled, chains, boardSize);
+        const move       = pickMove(board, validMoves, liberties, controlled, boardSize);
 
         try {
             if (move) {
@@ -202,9 +201,8 @@ function interpretResult(state) {
  * validMoves — boolean[][] from getValidMoves(). validMoves[x][y] = true if legal
  * liberties  — number[][] from getLiberties(). liberties[x][y] = count for stone, -1 for empty/dead
  * controlled — string[] from getControlledEmptyNodes(). controlled[x][y] = 'X'/'O'/'?'/'#'
- * chains     — (number|null)[][] from getChains(). chains[x][y] = chain ID or null
  */
-function pickMove(board, validMoves, liberties, controlled, chains, size) {
+function pickMove(board, validMoves, liberties, controlled, size) {
     // --- 1. Capture: fill last liberty of an enemy group ---
     const capture = findGroupAtLiberties(board, validMoves, liberties, size, 'O', 1);
     if (capture) return capture;
@@ -321,10 +319,10 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
  * Score a candidate move. Higher = better.
  *
  * Factors:
- * - Positional:    3rd-line positions preferred (ideal = floor(size/4))
- * - Territory:     adjacent contested ('?') +3, enemy-controlled +4, ours +1
- * - Connectivity:  adjacent to our stones +2 each
- * - Chain growth:  +3 if adjacent to a stone in our largest chain (mirrors growth() priority)
+ * - Positional: 2nd-line preferred (ideal = floor(size/4))
+ * - Territory:  extend own ('X' ctrl) +3, neutral ('?') +2, enemy ('O') -3 — build our moyo, don't walk into theirs
+ * - Connectivity: adjacent own stone +2
+ * - Openness: +0.5 per empty cell within Manhattan-2 — prefer open space over contested zones
  */
 function moveScore(board, controlled, x, y, size) {
     let score = positionalScore(x, y, size);
@@ -334,61 +332,24 @@ function moveScore(board, controlled, x, y, size) {
         const ctrl = controlled[n.x] && controlled[n.x][n.y];
 
         if (cell === '.') {
-            if (ctrl === '?') score += 3;
-            if (ctrl === 'O') score += 4;
-            if (ctrl === 'X') score += 1;
+            if (ctrl === 'X') score += 3;
+            if (ctrl === '?') score += 2;
+            if (ctrl === 'O') score -= 3;
         }
         if (cell === 'X') score += 2;
     }
 
+    // Openness: empty cells within Manhattan distance 2 — more open space = more future potential
+    for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = -2; dy <= 2; dy++) {
+            if (Math.abs(dx) + Math.abs(dy) > 2) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || nx >= size || ny < 0 || ny >= size) continue;
+            if (board[nx] && board[nx][ny] === '.') score += 0.5;
+        }
+    }
+
     return score;
-}
-
-/**
- * Returns the best valid move to extend our largest chain (mirrors Slum Snakes' growth()).
- * Scores each liberty of the chain by number of empty neighbours — more empty = more future libs.
- */
-function findChainLiberty(board, validMoves, chains, largestChainId, size) {
-    let bestMove  = null;
-    let bestScore = -1;
-
-    for (let x = 0; x < size; x++) {
-        for (let y = 0; y < size; y++) {
-            if (!validMoves[x] || !validMoves[x][y]) continue;
-            const adj = getAdjacent(x, y, size);
-            const adjacentToChain = adj.some(n =>
-                board[n.x] && board[n.x][n.y] === 'X' &&
-                chains[n.x] && chains[n.x][n.y] === largestChainId
-            );
-            if (!adjacentToChain) continue;
-            const emptyNeighbors = adj.filter(n => board[n.x] && board[n.x][n.y] === '.').length;
-            if (emptyNeighbors > bestScore) {
-                bestScore = emptyNeighbors;
-                bestMove  = { x, y };
-            }
-        }
-    }
-
-    return bestMove;
-}
-
-/**
- * Returns the chain ID (from getChains()) of our largest connected group of stones,
- * or null if we have no stones on the board yet.
- */
-function getLargestChainId(board, chains, size, color = 'X') {
-    const sizes = {};
-    for (let x = 0; x < size; x++) {
-        for (let y = 0; y < size; y++) {
-            if (!board[x] || board[x][y] !== color) continue;
-            const id = chains[x] && chains[x][y];
-            if (id === null || id === undefined) continue;
-            sizes[id] = (sizes[id] || 0) + 1;
-        }
-    }
-    const entries = Object.entries(sizes);
-    if (entries.length === 0) return null;
-    return entries.reduce((best, e) => (e[1] > best[1] ? e : best))[0];
 }
 
 /**
