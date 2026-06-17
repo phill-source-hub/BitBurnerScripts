@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.5
+ * Version: 3.16.6
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -23,6 +23,7 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.6 - Log every move/pass/error to diagnose persistent X=0 boards.
  *   v3.16.5 - Fix critical passing bug: remove bestRate<0.05 early-pass threshold.
  *             When MCTS was pessimistic, we passed every turn → X=0, O=~45 boards.
  *             Now always play MCTS best candidate; game ends naturally when both pass.
@@ -103,7 +104,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.5';
+const VERSION       = '3.16.6';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -225,11 +226,14 @@ async function playGame(ns, boardSize) {
 
         try {
             if (move) {
+                ns.print('[GO] play (' + move.x + ',' + move.y + ')');
                 await ns.go.makeMove(move.x, move.y);
             } else {
+                ns.print('[GO] pass (no move)');
                 await ns.go.passTurn();
             }
         } catch (e) {
+            ns.print('[GO] makeMove error: ' + e + ' — passing');
             try { await ns.go.passTurn(); } catch (_) {}
         }
 
