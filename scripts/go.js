@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.17.2';
+const VERSION       = '3.17.3';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -240,17 +240,6 @@ async function playGame(ns, boardSize) {
         const validMoves = ns.go.analysis.getValidMoves();
         const liberties  = ns.go.analysis.getLiberties();
         const controlled = ns.go.analysis.getControlledEmptyNodes();
-
-        // Anchor debug: log board and validMoves for first 4 turns
-        const xCount = board.flat ? board.flat().filter(c => c === 'X').length
-                                  : board.reduce((s,col) => s + [...col].filter(c=>c==='X').length, 0);
-        if (xCount < 4) {
-            const sz = boardSize;
-            const cx = (sz-1)/2, cy = (sz-1)/2;
-            const ctr = board[cx] ? board[cx][cy] : '?';
-            ns.print('[GO] anchor-dbg xCount=' + xCount + ' center(' + cx + ',' + cy + ')=' + ctr
-                + ' vm=' + (validMoves[cx] ? validMoves[cx][cy] : '?'));
-        }
 
         const move       = pickMove(board, validMoves, liberties, controlled, boardSize);
 
