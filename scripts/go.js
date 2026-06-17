@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.17.5';
+const VERSION       = '3.17.6';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -218,6 +218,7 @@ export async function main(ns) {
 // =============================================================================
 
 async function playGame(ns, boardSize) {
+    let moveNum = 0;
     while (true) {
         let state;
         try {
@@ -241,10 +242,11 @@ async function playGame(ns, boardSize) {
         const liberties  = ns.go.analysis.getLiberties();
         const controlled = ns.go.analysis.getControlledEmptyNodes();
 
-        const move       = pickMove(ns, board, validMoves, liberties, controlled, boardSize);
+        const move       = pickMove(ns, board, validMoves, liberties, controlled, boardSize, moveNum);
 
         try {
             if (move) {
+                moveNum++;
                 await ns.go.makeMove(move.x, move.y);
             } else {
                 ns.print('[GO] pass (no move)');
@@ -289,8 +291,6 @@ function findAnchorMove(board, validMoves, size) {
             if (board[x] && board[x][y] === 'X') xStones.push({ x, y });
         }
     }
-
-    if (xStones.length >= ANCHOR_STONES) return null;  // anchor done, let MCTS take over
 
     const cx = (size - 1) / 2;
     const cy = (size - 1) / 2;
@@ -346,12 +346,12 @@ function findAnchorMove(board, validMoves, size) {
  * liberties  — number[][] from getLiberties(). liberties[x][y] = count for stone, -1 for empty/dead
  * controlled — string[] from getControlledEmptyNodes(). controlled[x][y] = 'X'/'O'/'?'/'#'
  */
-function pickMove(ns, board, validMoves, liberties, controlled, size) {
+function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
     // --- 0. Opening anchor: first ANCHOR_STONES moves build a connected group near center,
     //     BEFORE capture/defend so early-game defend heuristics can't interrupt the anchor.
     //     Move 1: closest valid cell to center with ≥3 liberties.
     //     Move 2-N: valid cell adjacent to our group, highest post-placement liberty count. ---
-    const anchor = findAnchorMove(board, validMoves, size);
+    const anchor = moveNum < ANCHOR_STONES ? findAnchorMove(board, validMoves, size) : null;
     if (anchor) {
         ns.print('[GO] anchor → (' + anchor.x + ',' + anchor.y + ')');
         return anchor;
