@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.1
+ * Version: 3.16.2
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -24,6 +24,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.2 - Opponent demotion: after WIN_THRESHOLD consecutive losses drop back one
+ *             opponent. Removes --auto-advance/--no-advance flags (always on).
+ *             Prevents getting stuck on TBH (9% win rate) after advancing from SS.
  *   v3.16.1 - Revert eye create/block (steps 3.5/3.6): caused 26% SS win rate (vs 37%
  *             baseline). Eye block played weak moves inside O-controlled territory.
  *             Functions retained for future refinement. Keep: '#' fix + smother.
@@ -86,8 +89,6 @@
  * Flags:
  *   --opponent S     Starting opponent (default: 'Netburners')
  *   --size N         Board size 5/7/9/13 (default: 7)
- *   --auto-advance   Advance to harder opponent after WIN_THRESHOLD wins (default: true)
- *   --no-advance     Stay on current opponent forever
  *   --once           Play one game and exit
  *
  * Dependencies:
@@ -96,7 +97,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.1';
+const VERSION       = '3.16.2';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -114,19 +115,17 @@ export async function main(ns) {
     const flags = ns.flags([
         ['opponent',     'Netburners'],
         ['size',         7],
-        ['auto-advance', true],
-        ['no-advance',   false],
         ['once',         false],
     ]);
 
     ns.disableLog('ALL');
     ns.print('=== go.js v' + VERSION + ' | opponent=' + flags.opponent + ' size=' + flags.size + ' ===');
 
-    const autoAdvance   = flags['auto-advance'] && !flags['no-advance'];
-    let opponentIdx     = Math.max(0, OPPONENTS.indexOf(flags.opponent));
-    let consecutiveWins = 0;
-    let totalWins       = 0;
-    let totalLosses     = 0;
+    let opponentIdx       = Math.max(0, OPPONENTS.indexOf(flags.opponent));
+    let consecutiveWins   = 0;
+    let consecutiveLosses = 0;
+    let totalWins         = 0;
+    let totalLosses       = 0;
 
     do {
         const opponent = OPPONENTS[opponentIdx];
@@ -146,17 +145,27 @@ export async function main(ns) {
         if (result === 'win') {
             totalWins++;
             consecutiveWins++;
+            consecutiveLosses = 0;
             ns.tprint('[GO] WIN vs ' + opponent + ' | streak=' + consecutiveWins + ' | total ' + totalWins + 'W/' + totalLosses + 'L');
 
-            if (autoAdvance && consecutiveWins >= WIN_THRESHOLD && opponentIdx < OPPONENTS.length - 1) {
+            if (consecutiveWins >= WIN_THRESHOLD && opponentIdx < OPPONENTS.length - 1) {
                 opponentIdx++;
-                consecutiveWins = 0;
+                consecutiveWins   = 0;
+                consecutiveLosses = 0;
                 ns.tprint('[GO] Advanced to opponent: ' + OPPONENTS[opponentIdx]);
             }
         } else {
             totalLosses++;
             consecutiveWins = 0;
-            ns.print('[GO] ' + result.toUpperCase() + ' vs ' + opponent + ' | total ' + totalWins + 'W/' + totalLosses + 'L');
+            consecutiveLosses++;
+            ns.print('[GO] LOSS vs ' + opponent + ' | streak=' + consecutiveLosses + ' | total ' + totalWins + 'W/' + totalLosses + 'L');
+
+            if (consecutiveLosses >= WIN_THRESHOLD && opponentIdx > 0) {
+                opponentIdx--;
+                consecutiveWins   = 0;
+                consecutiveLosses = 0;
+                ns.tprint('[GO] Demoted to opponent: ' + OPPONENTS[opponentIdx]);
+            }
         }
 
     } while (!flags.once);
