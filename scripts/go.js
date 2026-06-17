@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.7
+ * Version: 3.16.8
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -23,6 +23,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.8 - Increase friendly-adjacency bonus: X+2→+8, add '#'+2 (wall bonus).
+ *             Scattered isolated stones were getting surrounded; low +2 weight let
+ *             territory/enemy-control bonuses dominate, discouraging group connection.
  *   v3.16.7 - Filter MCTS candidates with ≤1 liberty after placement: stones in atari
  *             immediately after being placed get captured next turn, causing the same
  *             cell to be replayed repeatedly (X=0 boards). Skip those candidates.
@@ -107,7 +110,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.7';
+const VERSION       = '3.16.8';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -433,7 +436,8 @@ function moveScore(board, controlled, x, y, size) {
             if (ctrl === 'O') score += 4;
             if (ctrl === 'X') score += 1;
         }
-        if (cell === 'X') score += 2;
+        if (cell === 'X') score += 8;   // strongly prefer connecting to our own groups
+        if (cell === '#') score += 2;   // dead cells act as free liberties (walls)
     }
 
     return score;
