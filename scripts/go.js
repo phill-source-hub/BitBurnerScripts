@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.18.3';
+const VERSION       = '3.18.4';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -365,7 +365,7 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
 
     // --- 4. Defend early: extend our group at ≤3 libs when under pressure ---
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 3, true);
-    if (defend2) { ns.print('[GO] d2 → (' + defend2.x + ',' + defend2.y + ')'); return defend2; }
+    if (defend2) return defend2;
 
     // --- 5. Territory-scored MCTS: candidates ranked by heuristic + territory gain,
     //        then final selection via Monte Carlo rollouts. ---
@@ -373,12 +373,10 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
     const flat   = _toFlat(board, size);
     const baseXs = _score(flat, t).xs;  // our territory before any move (shared baseline)
 
-    let validCount = 0;
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            validCount++;
             const idx   = x * size + y;
             const after = _applyMove(flat, idx, 1, t);
             const terr  = after ? Math.max(0, _score(after, t).xs - baseXs) : 0;
@@ -387,7 +385,6 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
         }
     }
 
-    ns.print('[GO] MCTS valid=' + validCount + ' cands=' + candidates.length);
     if (candidates.length === 0) return null;
 
     candidates.sort((a, b) => b.h - a.h);
