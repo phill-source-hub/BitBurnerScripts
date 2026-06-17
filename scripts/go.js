@@ -72,7 +72,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.7.0';
+const VERSION       = '3.8.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
