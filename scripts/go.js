@@ -24,6 +24,12 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.22.0 - Replace single center anchor with two-seed opening (Option B).
+ *             Seeds placed in upper-left and lower-right quadrants (25%/75% of board).
+ *             Two isolated groups force opponent to defend two fronts simultaneously,
+ *             making X=0 (capturing ALL stones) much harder than a single center cluster.
+ *             MCTS + biased rollouts then extends both seeds while contesting territory.
+ *             ANCHOR_STONES reduced 3→2 (one seed per quadrant, no connected extension).
  *   v3.21.0 - Two improvements to MCTS quality:
  *             1. Safety candidate injection: liberties of our group at ≤4 libs are
  *                always included in the MCTS evaluation pool, even if they rank outside
@@ -140,7 +146,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.21.3';
+const VERSION       = '3.22.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -291,59 +297,35 @@ function interpretResult(state) {
 // Opening anchor
 // =============================================================================
 
-const ANCHOR_STONES = 3;    // connected opening; fewer anchor moves lets MCTS spread out sooner
+const ANCHOR_STONES = 2;    // two seeds in opposite quadrants — forces opponent to defend two fronts
 
 /**
- * Opening book: build a connected anchor group near center for the first ANCHOR_STONES moves.
+ * Opening book: play two seed stones in opposite quadrants of the board.
  *
- * Move 1 (no X on board): pick valid cell closest to center with ≥3 liberties.
- * Move 2-N (X exists, group < ANCHOR_STONES): pick valid cell adjacent to our group
- *   with the highest post-placement liberty count for the resulting group (≥2 libs).
- * Returns null once we have ANCHOR_STONES stones placed (MCTS takes over).
+ * Move 1 (moveNum=0): closest valid cell to upper-left target with ≥2 liberties.
+ * Move 2 (moveNum=1): closest valid cell to lower-right target with ≥2 liberties.
+ *
+ * Two isolated seeds are harder to simultaneously capture than one center cluster.
+ * MCTS (with biased rollouts) then extends both seeds while contesting territory.
+ * Target positions scale with board size so this works for 7x7, 9x9, 13x13.
  */
-function findAnchorMove(board, validMoves, size) {
-    // Count X stones and collect their positions
-    const xStones = [];
+function findAnchorMove(board, validMoves, size, moveNum) {
+    const targets = [
+        { x: Math.round(size * 0.25), y: Math.round(size * 0.75) },  // upper-left quadrant
+        { x: Math.round(size * 0.75), y: Math.round(size * 0.25) },  // lower-right quadrant
+    ];
+    const target = targets[moveNum] || targets[0];
+
+    let best = null, bestDist = Infinity;
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
-            if (board[x] && board[x][y] === 'X') xStones.push({ x, y });
-        }
-    }
-
-    const cx = (size - 1) / 2;
-    const cy = (size - 1) / 2;
-
-    if (xStones.length === 0) {
-        // Move 1: closest valid cell to center with ≥3 liberties
-        let best = null, bestDist = Infinity;
-        for (let x = 0; x < size; x++) {
-            for (let y = 0; y < size; y++) {
-                if (!validMoves[x] || !validMoves[x][y]) continue;
-                const libs = getAdjacent(x, y, size).filter(
-                    n => board[n.x] && board[n.x][n.y] === '.'
-                ).length;
-                if (libs < 3) continue;
-                const dist = Math.abs(x - cx) + Math.abs(y - cy);
-                if (dist < bestDist) { bestDist = dist; best = { x, y }; }
-            }
-        }
-        return best;
-    }
-
-    // Moves 2-N: extend our existing group — pick valid adjacent cell with most resulting libs
-    const xSet = new Set(xStones.map(s => s.x * size + s.y));
-    let best = null, bestScore = -1;
-    for (const stone of xStones) {
-        for (const n of getAdjacent(stone.x, stone.y, size)) {
-            if (!validMoves[n.x] || !validMoves[n.x][n.y]) continue;
-            const candidateLibs = getAdjacent(n.x, n.y, size).filter(
-                a => (board[a.x] && board[a.x][a.y] === '.') ||
-                     xSet.has(a.x * size + a.y)
+            if (!validMoves[x] || !validMoves[x][y]) continue;
+            const libs = getAdjacent(x, y, size).filter(
+                n => board[n.x] && board[n.x][n.y] === '.'
             ).length;
-            if (candidateLibs < 2) continue;
-            const edgeDist = Math.min(n.x, size - 1 - n.x, n.y, size - 1 - n.y);
-            const score = candidateLibs * 10 + edgeDist;
-            if (score > bestScore) { bestScore = score; best = { x: n.x, y: n.y }; }
+            if (libs < 2) continue;
+            const dist = Math.abs(x - target.x) + Math.abs(y - target.y);
+            if (dist < bestDist) { bestDist = dist; best = { x, y }; }
         }
     }
     return best;
@@ -375,7 +357,7 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
     //     Runs for first ANCHOR_STONES moves (move 1 picks closest-to-center cell with ≥3 libs;
     //     subsequent moves extend from existing X stones by libs+edgeDist score).
     //     Keeps all stones in one connected blob — isolated MCTS stones get surrounded and die. ---
-    const anchor = moveNum < ANCHOR_STONES ? findAnchorMove(board, validMoves, size) : null;
+    const anchor = moveNum < ANCHOR_STONES ? findAnchorMove(board, validMoves, size, moveNum) : null;
     if (anchor) {
         ns.print('[GO] anchor → (' + anchor.x + ',' + anchor.y + ')');
         return anchor;
