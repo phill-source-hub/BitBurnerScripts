@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.18.4';
+const VERSION       = '3.19.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -519,7 +519,31 @@ function moveScore(board, controlled, x, y, size) {
         if (cell === 'X') score += 4;
     }
 
+    score += eyeCreationBonus(board, x, y, size);
     return score;
+}
+
+/**
+ * Bonus for moves that create or advance eye formation.
+ * For each empty cell adjacent to (x,y), counts how many of its neighbors would be
+ * X or board-edge after placing at (x,y). Full eye (4) = +8, proto-eye (3) = +2.
+ */
+function eyeCreationBonus(board, x, y, size) {
+    let bonus = 0;
+    for (const n of getAdjacent(x, y, size)) {
+        if (board[n.x] && board[n.x][n.y] !== '.') continue; // only empty cells
+        const nAdj  = getAdjacent(n.x, n.y, size);
+        const walls = 4 - nAdj.length;            // board-edge sides count as X
+        let xCount  = walls;
+        for (const nn of nAdj) {
+            if (nn.x === x && nn.y === y) { xCount++; continue; } // our new stone
+            const c = board[nn.x] && board[nn.x][nn.y];
+            if (c === 'X' || c === '#') xCount++;
+        }
+        if (xCount >= 4) bonus += 8;  // empty cell becomes a true eye
+        else if (xCount === 3) bonus += 2;  // one more stone away from an eye
+    }
+    return bonus;
 }
 
 /**
