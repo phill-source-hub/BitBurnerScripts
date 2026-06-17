@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.3
+ * Version: 3.16.4
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -23,6 +23,7 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.4 - Log final board state + score on every loss for pattern analysis.
  *   v3.16.3 - Remove smother (step 3.7): overrode MCTS even when territory move
  *             was better. SS win rate near 0% with smother active. Isolates
  *             v3.15.0 territory+MCTS as clean baseline to measure from.
@@ -99,7 +100,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.3';
+const VERSION       = '3.16.4';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -112,6 +113,21 @@ const OPPONENTS = [
 ];
 
 const MOVE_DELAY = 200;
+
+function logBoard(ns, size) {
+    const board = ns.go.getBoardState();
+    const score = ns.go.getGameState ? ns.go.getGameState() : null;
+    ns.print('[GO] --- final board ---');
+    for (let y = size - 1; y >= 0; y--) {
+        let row = y + ' ';
+        for (let x = 0; x < size; x++) {
+            row += (board[x] ? board[x][y] : '?') + ' ';
+        }
+        ns.print(row);
+    }
+    ns.print('    ' + Array.from({ length: size }, (_, i) => i).join(' '));
+    if (score) ns.print('[GO] score X=' + score.blackScore + ' O=' + score.whiteScore);
+}
 
 export async function main(ns) {
     const flags = ns.flags([
@@ -161,6 +177,7 @@ export async function main(ns) {
             consecutiveWins = 0;
             consecutiveLosses++;
             ns.print('[GO] LOSS vs ' + opponent + ' | streak=' + consecutiveLosses + ' | total ' + totalWins + 'W/' + totalLosses + 'L');
+            logBoard(ns, flags.size);
 
             if (consecutiveLosses >= WIN_THRESHOLD && opponentIdx > 0) {
                 opponentIdx--;
