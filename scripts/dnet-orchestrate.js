@@ -40,6 +40,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.11.0 - Heartbleed credential harvest: drain logs from every visible server each
+ *            cycle, parse "Connecting to host:password" entries, save discovered
+ *            passwords to port 6. Handles hostnames containing colons (greedy match).
  *   v1.10.0 - Dictionary attacks: FreshInstall_1.0, Laika4, TopPass, EuroZone Free.
  *            PHP 5.4 (SortedEchoVuln): generate unique permutations of sorted digits.
  *            BellaCuore high-diff: brute-force integer range from parsed roman numeral bounds.
@@ -170,7 +173,7 @@ let canExecSelf = false;
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.10.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.11.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -187,7 +190,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.10.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.11.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -260,6 +263,9 @@ async function runCycle(ns, flags) {
             if (r.success) log(ns, 'Session reconnected: ' + host);
         }
     }
+
+    // Drain heartbleed logs from all visible servers — may contain neighbour passwords
+    await drainHeartbleedCreds(ns, visible);
 
     // Sort shallowest depth first — stasis slots go to most accessible servers
     const byDepth = [...visible].sort(function(a, b) {
@@ -439,6 +445,52 @@ async function launchCrackWorker(ns, host, d) {
 
     log(ns, 'Crack worker launched: ' + host + ' pid=' + pid + ' threads=' + threads);
     return pid;
+}
+
+/**
+ * Drains heartbleed logs from all visible servers and extracts any leaked
+ * neighbour passwords. Log noise entries occasionally contain:
+ *   "Connecting to <hostname>:<password> ..."
+ * Greedy hostname match handles hostnames that themselves contain colons.
+ * Discovered credentials are saved to port 6 exactly like cracked passwords.
+ * @param {NS} ns
+ * @param {string[]} hosts - All directly-visible darknet hosts this cycle
+ */
+async function drainHeartbleedCreds(ns, hosts) {
+    for (const host of hosts) {
+        const d = ns.dnet.getServerDetails(host);
+        if (d.logTrafficInterval === -1) continue;                                   // Server has no traffic log — skip
+        if (!d.hasSession) continue;                                                 // Need a session to read logs
+
+        let bleed;
+        try {
+            bleed = await ns.dnet.heartbleed(host, { peek: false, logsToCapture: 10 });
+        } catch (_) { continue; }
+
+        if (!bleed.success || !bleed.logs || bleed.logs.length === 0) continue;
+
+        for (const entry of bleed.logs) {
+            // Match "Connecting to HOSTNAME:PASSWORD ..." — greedy hostname handles colons in name
+            const m = entry.match(/Connecting to (.+):([^ ]+) \.\.\./);
+            if (!m) continue;
+
+            const leakedHost = m[1];
+            const leakedPw   = m[2];
+
+            // Only save if we haven't already cracked this host
+            const existing = state.get(leakedHost);
+            if (existing && existing.password !== null) continue;
+
+            log(ns, 'HB CRED ' + host + ' leaked ' + leakedHost + ':' + leakedPw);
+            if (!state.has(leakedHost)) state.set(leakedHost, { password: null, phishPid: 0, stasisLinked: false, crackPid: 0 });
+            state.get(leakedHost).password = leakedPw;
+            saveCredToPort(ns, leakedHost, leakedPw);
+
+            // Immediately try to connect so the session is ready this cycle
+            const r = ns.dnet.connectToSession(leakedHost, leakedPw);
+            if (r.success) log(ns, 'HB session established: ' + leakedHost);
+        }
+    }
 }
 
 /**

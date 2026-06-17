@@ -15,6 +15,8 @@
  *   Scales with threads: more threads = more money per successful attack.
  *
  * Changelog:
+ *   v1.1.0 - Check for .cache files every loop iteration (not only after phish success)
+ *            so caches dropped by memoryReallocation() are collected promptly.
  *   v1.0.0 - Initial version.
  *
  * Flags:
@@ -29,13 +31,25 @@
 
 import { log } from '/scripts/lib-utils.js';
 
+/**
+ * Opens and logs all .cache files present on the current host.
+ * Called at top of each loop and after each phish success.
+ */
+function openAllCaches(ns, dnet) {
+    const caches = ns.ls(ns.getHostname(), '.cache');
+    for (const file of caches) {
+        const r = dnet.openCache(file);
+        log(ns, 'Cache opened ' + file + ': ' + (r.message || JSON.stringify(r)));
+    }
+}
+
 // --- Constants ---
 const CYCLE_SLEEP_MS = 200;                                                         // Minimum yield per loop to avoid engine lockup
 
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-phish.js v1.0.0 ===');
+    ns.tprint('=== dnet-phish.js v1.1.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -52,6 +66,10 @@ export async function main(ns) {
     log(ns, 'dnet-phish started on ' + ns.getHostname());
 
     while (true) {
+        // Open any .cache files present — may have been dropped by memoryReallocation()
+        // in a previous cycle, not just by phishing. Check every iteration.
+        openAllCaches(ns, dnet);
+
         const result = await dnet.phishingAttack();                                 // Blocks until attack resolves; scales with threads
         attempts++;
 
@@ -59,13 +77,7 @@ export async function main(ns) {
             successes++;
             log(ns, 'Phish hit! (' + successes + '/' + attempts + ')  '
                 + (result.data ? JSON.stringify(result.data) : ''));
-
-            // Collect any .cache files dropped into this server's directory
-            const caches = ns.ls(ns.getHostname(), '.cache');
-            for (const file of caches) {
-                const cacheResult = dnet.openCache(file);                           // Opens and consumes the cache for its reward
-                log(ns, 'Opened cache ' + file + ': ' + JSON.stringify(cacheResult));
-            }
+            openAllCaches(ns, dnet);                                                // Collect caches dropped by this attack immediately
         } else {
             log(ns, 'Phish miss. Code: ' + result.code + '  (' + attempts + ' attempts)');
         }
