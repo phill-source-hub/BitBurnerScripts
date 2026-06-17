@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.14.0
+ * Version: 3.16.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -9,13 +9,14 @@
  *   Source-File bonus. Loops: play game to completion, reset, repeat.
  *
  *   Strategy per turn (uses ns.go.analysis API):
- *     1. Capture:       fill the last liberty of any enemy group (valid move)
- *     2. Defend:        fill the last liberty of any of our groups (valid move)
- *     3. Defend early:  fill a liberty of any of our groups at ≤2 libs
- *                       (prevents Black Hand's surround→atari combo)
- *     4. MCTS:          rank top-N heuristic candidates via Monte Carlo rollouts;
- *                       pick move with highest simulated win rate
- *     5. Pass:          no valid move or <5% win rate across all candidates
+ *     1.   Capture:      fill the last liberty of any enemy group
+ *     2.   Defend:       fill the last liberty of any of our groups
+ *     3.   Defend early: fill liberty of our group at <=2 libs (enemy adjacent)
+ *     3.5. Eye create:   split our controlled territory into 2 enclosed regions
+ *     3.6. Eye block:    deny enemy's vital eye-splitting move in their territory
+ *     3.7. Smother:      safely attack enemy groups at exactly 2 libs
+ *     4.   MCTS:         rank top-N by territory-aware heuristic via rollouts
+ *     5.   Pass:         no valid move or <5% win rate across all candidates
  *
  *   Opponent selection: starts at easiest ('Netburners'), advances after
  *   WIN_THRESHOLD consecutive wins to the next opponent. Tracks wins/losses
@@ -25,6 +26,14 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.0 - Four new improvements from doc review:
+ *             1. Fix '#' dead cells in _toFlat (encoded as 0 = playable; now 3 = blocked).
+ *             2. Eye creation (step 3.5): find moves that split our controlled territory
+ *                into 2 separate enclosed regions — makes our group permanently uncapturable.
+ *             3. Eye blocking (step 3.6): find the enemy's vital eye-splitting point inside
+ *                their controlled territory and play there first.
+ *             4. Smother (step 3.7): attack enemy groups at exactly 2 libs with safe
+ *                placement — reduces them toward atari without exposing our stones.
  *   v3.15.0 - Territory completion scoring + improved MCTS.
  *             B: add TERR_WEIGHT * territoryGain to heuristic before top-8 filter.
  *             territoryGain = flood-fill delta (_score after move minus before).
@@ -86,7 +95,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.15.0';
+const VERSION       = '3.16.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -230,6 +239,18 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
+    // --- 3.5. Eye create: split our enclosed territory into 2 separate eyes ---
+    const eyeCreate = findEyeCreationMove(board, validMoves, controlled, size);
+    if (eyeCreate) return eyeCreate;
+
+    // --- 3.6. Eye block: deny enemy's vital eye-splitting point ---
+    const eyeBlock = findEyeBlockingMove(board, validMoves, controlled, size);
+    if (eyeBlock) return eyeBlock;
+
+    // --- 3.7. Smother: safely attack enemy groups at exactly 2 libs ---
+    const smother = findGroupAtLiberties(board, validMoves, liberties, size, 'O', 2, false, true);
+    if (smother) return smother;
+
     // --- 4. Territory-scored MCTS: candidates ranked by heuristic + territory gain,
     //        then final selection via Monte Carlo rollouts. ---
     const t      = _adj(size);
@@ -281,7 +302,7 @@ function pickMove(board, validMoves, liberties, controlled, size) {
  * requirePressure  → when true, only act if an enemy stone is already adjacent to the group;
  *                    prevents wasting moves defending groups that face no actual threat
  */
-function findGroupAtLiberties(board, validMoves, liberties, size, color, threshold, requirePressure = false) {
+function findGroupAtLiberties(board, validMoves, liberties, size, color, threshold, requirePressure = false, safeOnly = false) {
     const visited = new Set();
     let bestMove  = null;
     let bestScore = -Infinity;
@@ -337,6 +358,15 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
                 const adj2           = getAdjacent(node.x, node.y, size);
                 const emptyNeighbors = adj2.filter(n => board[n.x] && board[n.x][n.y] === '.').length;
                 const ownNeighbors   = adj2.filter(n => board[n.x] && board[n.x][n.y] === color).length;
+
+                // safeOnly: skip moves where our placed stone would have <2 free neighbours
+                // and no adjacent friendly X group with 3+ libs (would be immediately vulnerable)
+                if (safeOnly) {
+                    const xAdj        = adj2.filter(n => board[n.x] && board[n.x][n.y] === 'X');
+                    const strongFriend = xAdj.some(n => liberties[n.x] && liberties[n.x][n.y] >= 3);
+                    if (emptyNeighbors < 2 && !strongFriend) continue;
+                }
+
                 // More empty = more future liberties; more own = better connectivity
                 const score = emptyNeighbors * 2 + ownNeighbors;
 
@@ -401,6 +431,93 @@ function getAdjacent(x, y, size) {
 
 
 // =============================================================================
+// Eye moves
+// =============================================================================
+
+/**
+ * Returns true if placing a stone at (bx, by) would disconnect `cells` into
+ * two or more connected components (cells are all the same controlled colour).
+ * Uses numeric cell indices (x*size+y) for fast Set membership.
+ */
+function _splitsCells(cells, bx, by, size, board, controlled, ctrlColor) {
+    const visited = new Set();
+    let components = 0;
+    for (const start of cells) {
+        const k = start.x * size + start.y;
+        if (visited.has(k)) continue;
+        components++;
+        if (components >= 2) return true;
+        const queue = [start];
+        visited.add(k);
+        while (queue.length) {
+            const curr = queue.pop();
+            for (const n of getAdjacent(curr.x, curr.y, size)) {
+                if (n.x === bx && n.y === by) continue;              // pretend (bx,by) is blocked
+                const nk = n.x * size + n.y;
+                if (visited.has(nk)) continue;
+                if (board[n.x]      && board[n.x][n.y]      === '.' &&
+                    controlled[n.x] && controlled[n.x][n.y] === ctrlColor) {
+                    visited.add(nk);
+                    queue.push(n);
+                }
+            }
+        }
+    }
+    return components >= 2;
+}
+
+/**
+ * Find a move that splits our controlled empty territory into two separate
+ * enclosed regions — creating two eyes makes the surrounding group uncapturable.
+ * Returns { x, y } or null.
+ */
+function findEyeCreationMove(board, validMoves, controlled, size) {
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            if (!validMoves[x] || !validMoves[x][y]) continue;
+
+            // Collect adjacent X-controlled empty nodes
+            const ctrlAdj = getAdjacent(x, y, size).filter(
+                n => board[n.x] && board[n.x][n.y] === '.' &&
+                     controlled[n.x] && controlled[n.x][n.y] === 'X'
+            );
+            if (ctrlAdj.length < 2) continue;
+
+            // If placing here disconnects those nodes → we create 2 separate eye regions
+            if (_splitsCells(ctrlAdj, x, y, size, board, controlled, 'X')) return { x, y };
+        }
+    }
+    return null;
+}
+
+/**
+ * Find and claim the enemy's "vital point" — the move they would play to split
+ * their controlled territory into two eyes (making their group uncapturable).
+ * Only considers moves INSIDE O-controlled space (valid per suicide rule only
+ * when their territory has multiple empty nodes).
+ * Returns { x, y } or null.
+ */
+function findEyeBlockingMove(board, validMoves, controlled, size) {
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            if (!validMoves[x] || !validMoves[x][y]) continue;
+            if (!controlled[x] || controlled[x][y] !== 'O') continue; // only inside enemy territory
+
+            const ctrlAdj = getAdjacent(x, y, size).filter(
+                n => board[n.x] && board[n.x][n.y] === '.' &&
+                     controlled[n.x] && controlled[n.x][n.y] === 'O'
+            );
+            if (ctrlAdj.length < 2) continue;
+
+            // This is where they would split — play it first
+            if (_splitsCells(ctrlAdj, x, y, size, board, controlled, 'O')) return { x, y };
+        }
+    }
+    return null;
+}
+
+
+// =============================================================================
 // MCTS — Monte Carlo Tree Search helpers
 // All board operations run on flat Uint8Arrays (no NS calls).
 // Color encoding: 0=empty, 1=X(us/Black), 2=O(enemy/White), 3=dead('#').
@@ -429,14 +546,15 @@ function _adj(size) {
     return (_adjCache[size] = t);
 }
 
-/** Convert string[] board to flat Uint8Array. 1=X(us), 2=O(enemy), 0=empty/dead. */
+/** Convert string[] board to flat Uint8Array. 1=X(us), 2=O(enemy), 3=dead('#'), 0=empty. */
 function _toFlat(board, size) {
     const arr = new Uint8Array(size * size);
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             const c = board[x] && board[x][y];
-            if (c === 'X') arr[x * size + y] = 1;
+            if (c === 'X')      arr[x * size + y] = 1;
             else if (c === 'O') arr[x * size + y] = 2;
+            else if (c === '#') arr[x * size + y] = 3; // dead node — not playable, not territory
         }
     }
     return arr;
