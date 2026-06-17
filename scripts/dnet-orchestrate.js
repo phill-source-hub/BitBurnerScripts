@@ -40,6 +40,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.16.0 - propagateToHub: reclaim blocked RAM via memoryReallocation before exec
+ *            when freeRam < actualScriptRam. Fixes HUB EXEC FAILED on darkweb after
+ *            game reset (script=16.3 GB > darkweb default 16 GB; 0.3 GB is blocked).
  *   v1.14.0 - DeepGreen (Mastermind): use authenticate() feedback data="exact,misplaced"
  *            to solve via constraint elimination (~7–15 calls vs thousands of brute-force).
  *            Falls through to crack worker only for rare alphanumeric passwords.
@@ -182,7 +185,7 @@ let canExecSelf = false;
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.15.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.16.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -199,7 +202,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.15.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.16.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -907,19 +910,27 @@ async function propagateToHub(ns, host) {
         return;                                                                      // Already running — file updated, will use new version on next restart
     }
 
-    const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
-    if (freeRam < ORCH_RAM_GB) {
-        log(ns, 'HUB SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ~' + ORCH_RAM_GB + ')');
+    const actualRam = ns.getScriptRam(ORCH_SCRIPT, 'home');
+    let freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+
+    // Reclaim blocked (owner-reserved) RAM if we don't have enough headroom
+    if (freeRam < actualRam) {
+        const blocked = ns.dnet.getServerDetails(host).blockedRam;
+        if (blocked > 0) {
+            log(ns, 'HUB ' + host + ' need ' + actualRam.toFixed(2) + ' GB, ' + freeRam.toFixed(2) + ' free — reclaiming ' + blocked.toFixed(2) + ' GB blocked RAM');
+            await freeMemory(ns, host, blocked);
+            freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
+        }
+    }
+
+    if (freeRam < actualRam) {
+        log(ns, 'HUB SKIP ' + host + ' — only ' + freeRam.toFixed(2) + ' GB free, need ' + actualRam.toFixed(2));
         return;
     }
 
-    const actualRam = ns.getScriptRam(ORCH_SCRIPT, 'home');
-    const maxRamHub = ns.getServerMaxRam(host);
-    const usedRamHub = ns.getServerUsedRam(host);
-    log(ns, 'HUB exec ' + host + ' scriptRam=' + actualRam.toFixed(2) + ' hub=' + usedRamHub.toFixed(1) + '/' + maxRamHub.toFixed(1) + ' GB');
     const pid = ns.exec(ORCH_SCRIPT, host, 1);
     if (pid === 0) {
-        log(ns, 'HUB EXEC FAILED ' + host + ' — need ' + actualRam.toFixed(2) + ' GB, hub has ' + (maxRamHub - usedRamHub).toFixed(2) + ' free');
+        log(ns, 'HUB EXEC FAILED ' + host + ' — need ' + actualRam.toFixed(2) + ' GB, hub has ' + freeRam.toFixed(2) + ' free');
         return;
     }
 
