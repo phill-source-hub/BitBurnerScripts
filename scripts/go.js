@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.9.0
+ * Version: 3.10.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -72,7 +72,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.9.0';
+const VERSION       = '3.10.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -216,7 +216,30 @@ function pickMove(board, validMoves, liberties, controlled, size, opponent) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
-    // --- 4. Expand: score all valid moves ---
+    // --- 4. Opening book (Slum Snakes only): race to corner 2nd-line positions before their
+    //        chain grows to reach them. Fires only while the board is still sparse (<8 stones).
+    if (opponent === 'Slum Snakes') {
+        let totalStones = 0;
+        for (let x = 0; x < size; x++) {
+            for (let y = 0; y < size; y++) {
+                if (board[x] && (board[x][y] === 'X' || board[x][y] === 'O')) totalStones++;
+            }
+        }
+        if (totalStones < 8) {
+            const ideal = Math.floor(size / 4);                                     // 1 for 7x7 (2nd-line corner)
+            const corners = [
+                { x: ideal,        y: ideal },
+                { x: size-1-ideal, y: size-1-ideal },
+                { x: ideal,        y: size-1-ideal },
+                { x: size-1-ideal, y: ideal },
+            ];
+            for (const c of corners) {
+                if (validMoves[c.x] && validMoves[c.x][c.y]) return c;
+            }
+        }
+    }
+
+    // --- 5. Expand: score all valid moves ---
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
@@ -319,9 +342,10 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
  * Score a candidate move. Higher = better.
  *
  * Opponent-aware weights:
- *   Slum Snakes — moyo strategy: build in open space, avoid walking into their chain.
- *                 Their chain is huge but they pass 35% of time — our stones near it get surrounded.
- *                 O: -3  X: +3  ?: +2  + openness bonus
+ *   Slum Snakes — build own territory, stay neutral on theirs.
+ *                 O=0 (don't flee OR chase their chain), X=+3 (extend our enclosed regions),
+ *                 ?=+2. Opening book (step 4) claims corners first. Their chain is a snake
+ *                 shape that doesn't enclose territory — we just need to form closed regions.
  *   All others  — contest strategy (v3.2.0): play near enemy territory to block growth.
  *                 Netburners/TBH/etc never pass — playing near their chain creates boundary walls.
  *                 O: +4  X: +1  ?: +3  (proven 64% vs Netburners)
@@ -329,23 +353,22 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
 function moveScore(board, controlled, x, y, size, opponent) {
     let score = positionalScore(x, y, size);
 
-    const moyo = opponent === 'Slum Snakes';
+    const ss = opponent === 'Slum Snakes';
 
     for (const n of getAdjacent(x, y, size)) {
         const cell = board[n.x] && board[n.x][n.y];
         const ctrl = controlled[n.x] && controlled[n.x][n.y];
 
         if (cell === '.') {
-            if (ctrl === 'X') score += moyo ? 3 : 1;
-            if (ctrl === '?') score += moyo ? 2 : 3;
-            if (ctrl === 'O') score += moyo ? -3 : 4;
+            if (ctrl === 'X') score += ss ? 3 : 1;
+            if (ctrl === '?') score += ss ? 2 : 3;
+            if (ctrl === 'O') score += ss ? 0 : 4;   // Neutral vs SS (don't flee); contest vs others
         }
         if (cell === 'X') score += 2;
     }
 
-    // Openness: empty cells within Manhattan-2 — helps moyo stay in open space.
-    // Also a mild bonus for all opponents (open positions have more future potential).
-    const opennessWeight = moyo ? 0.5 : 0.2;
+    // Openness: empty cells within Manhattan-2 — mild bonus for all opponents.
+    const opennessWeight = ss ? 0.3 : 0.2;
     for (let dx = -2; dx <= 2; dx++) {
         for (let dy = -2; dy <= 2; dy++) {
             if (Math.abs(dx) + Math.abs(dy) > 2) continue;
