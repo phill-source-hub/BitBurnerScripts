@@ -24,6 +24,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.4.0 - Chain growth bonus +3→+6 (compete with territory bonuses); positional
+ *            ideal floor(size/4)→floor(size/3) — prefer 3rd line (7→2) for more board
+ *            influence vs Slum Snakes chain-growth strategy. 27% win rate prompted this.
  *   v3.3.0 - Chain growth: getLargestChainId() from getChains(); moves adjacent to
  *            our largest connected group score +3 extra, mirroring Slum Snakes'
  *            growth() priority. Helps build one strong group vs both chain-growth
@@ -58,7 +61,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.3.0';
+const VERSION       = '3.4.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -330,7 +333,7 @@ function moveScore(board, controlled, chains, largestChainId, x, y, size) {
         if (cell === 'X') {
             score += 2;
             if (largestChainId !== null && chains[n.x] && chains[n.x][n.y] === largestChainId) {
-                score += 3;                                                          // Extend largest chain — mirrors Slum Snakes growth() priority
+                score += 6;                                                          // Extend largest chain — mirrors Slum Snakes growth() priority
             }
         }
     }
@@ -363,7 +366,7 @@ function getLargestChainId(board, chains, size) {
  * On a 7x7 board, 2nd-line play provides edge-backed groups harder for TBH to surround.
  */
 function positionalScore(x, y, size) {
-    const ideal = Math.floor(size / 4);
+    const ideal = Math.floor(size / 3);                                             // 3rd-line preferred (7→2, 9→3, 13→4) — more board influence than 2nd-line
     const dx    = Math.min(x, size - 1 - x);
     const dy    = Math.min(y, size - 1 - y);
     return 6 - Math.abs(dx - ideal) - Math.abs(dy - ideal);
