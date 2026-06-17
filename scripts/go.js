@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 1.0.0
+ * Version: 2.0.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -8,12 +8,11 @@
  *   Plays games of Go against the AI to earn faction rep and progress toward
  *   Source-File bonus. Loops: play game to completion, reset, repeat.
  *
- *   Strategy per turn:
- *     1. Defend: if any of our stone groups has only 1 liberty, fill it
- *     2. Attack: if any enemy group has only 1 liberty, capture it
- *     3. Expand:  play the empty node closest to our existing stones that
- *                 would not immediately be captured (has ≥2 liberties after)
- *     4. Pass:    no good move found
+ *   Strategy per turn (uses ns.go.analysis API):
+ *     1. Capture: fill the last liberty of any enemy group (valid move required)
+ *     2. Defend:  fill the last liberty of any of our groups (valid move required)
+ *     3. Expand:  best valid move scored by territory control + positional value
+ *     4. Pass:    no valid move found
  *
  *   Opponent selection: starts at easiest ('Netburners'), advances after
  *   WIN_THRESHOLD consecutive wins to the next opponent. Tracks wins/losses
@@ -23,6 +22,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v2.0.0 - Use ns.go.analysis API for valid moves, liberties, territory control.
+ *            Fix edgeScore (was preferring corners; now prefers 3rd-line positions).
+ *            Prioritise capturing/defending by exact liberty count from getLiberties().
  *   v1.0.0 - Initial version.
  *
  * Flags:
@@ -35,11 +37,11 @@
  * Dependencies:
  *   None. Standalone — no imports.
  *
- * RAM: ~4 GB (ns.go.* calls have RAM cost in game)
+ * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '1.0.0';
-const WIN_THRESHOLD = 3;                                                             // Wins before advancing to harder opponent
+const VERSION       = '2.0.0';
+const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
     'Netburners',
@@ -50,7 +52,7 @@ const OPPONENTS = [
     'Illuminati',
 ];
 
-const MOVE_DELAY = 200;                                                              // ms between moves (avoid hammering game loop)
+const MOVE_DELAY = 200;
 
 export async function main(ns) {
     const flags = ns.flags([
@@ -64,16 +66,15 @@ export async function main(ns) {
     ns.disableLog('ALL');
     ns.print('=== go.js v' + VERSION + ' | opponent=' + flags.opponent + ' size=' + flags.size + ' ===');
 
-    const autoAdvance  = flags['auto-advance'] && !flags['no-advance'];
-    let opponentIdx    = Math.max(0, OPPONENTS.indexOf(flags.opponent));
+    const autoAdvance   = flags['auto-advance'] && !flags['no-advance'];
+    let opponentIdx     = Math.max(0, OPPONENTS.indexOf(flags.opponent));
     let consecutiveWins = 0;
-    let totalWins      = 0;
-    let totalLosses    = 0;
+    let totalWins       = 0;
+    let totalLosses     = 0;
 
     do {
         const opponent = OPPONENTS[opponentIdx];
 
-        // Start a new game
         try {
             await ns.go.resetBoardState(opponent, flags.size);
         } catch (e) {
@@ -84,7 +85,6 @@ export async function main(ns) {
 
         ns.print('[GO] New game vs ' + opponent + ' (' + flags.size + 'x' + flags.size + ')');
 
-        // Play until game ends
         const result = await playGame(ns, flags.size);
 
         if (result === 'win') {
@@ -108,7 +108,7 @@ export async function main(ns) {
 
 
 // =============================================================================
-// Game loop — returns 'win', 'loss', or 'tie'
+// Game loop
 // =============================================================================
 
 async function playGame(ns, boardSize) {
@@ -121,20 +121,20 @@ async function playGame(ns, boardSize) {
             return 'loss';
         }
 
-        // Game ended — currentPlayer is 'None' when both players have passed
         if (state.currentPlayer === 'None') {
             return interpretResult(state);
         }
 
-        // Not our turn (opponent is thinking)
         if (state.currentPlayer !== 'Black') {
             await ns.sleep(MOVE_DELAY);
             continue;
         }
 
-        // Our turn — pick a move
-        const board = ns.go.getBoardState();
-        const move  = pickMove(board, boardSize);
+        const board      = ns.go.getBoardState();
+        const validMoves = ns.go.analysis.getValidMoves();
+        const liberties  = ns.go.analysis.getLiberties();
+        const controlled = ns.go.analysis.getControlledEmptyNodes();
+        const move       = pickMove(board, validMoves, liberties, controlled, boardSize);
 
         try {
             if (move) {
@@ -143,7 +143,6 @@ async function playGame(ns, boardSize) {
                 await ns.go.passTurn();
             }
         } catch (e) {
-            // Move rejected (invalid) — pass instead
             try { await ns.go.passTurn(); } catch (_) {}
         }
 
@@ -152,7 +151,6 @@ async function playGame(ns, boardSize) {
 }
 
 function interpretResult(state) {
-    // state.blackScore vs state.whiteScore — we're Black
     if (!state) return 'loss';
     if (state.blackScore > state.whiteScore) return 'win';
     if (state.blackScore < state.whiteScore) return 'loss';
@@ -166,70 +164,124 @@ function interpretResult(state) {
 
 /**
  * Returns { x, y } for best move, or null to pass.
- * Board is array of strings, each char: '.' empty, 'X' us (Black), 'O' enemy (White), '#' dead
+ *
+ * board      — string[] from getBoardState(). board[x][y]: '.' empty, 'X' us, 'O' enemy, '#' dead
+ * validMoves — boolean[][] from getValidMoves(). validMoves[x][y] = true if legal
+ * liberties  — number[][] from getLiberties(). liberties[x][y] = count for stone, -1 for empty/dead
+ * controlled — string[] from getControlledEmptyNodes(). controlled[x][y] = 'X'/'O'/'?'/'#'
  */
-function pickMove(board, size) {
-    const empty   = getEmptyNodes(board, size);
-    const ourStones = getStones(board, size, 'X');
-    const theirStones = getStones(board, size, 'O');
+function pickMove(board, validMoves, liberties, controlled, size) {
+    // --- 1. Capture: fill last liberty of an enemy group ---
+    const capture = findGroupLastLiberty(board, validMoves, liberties, size, 'O');
+    if (capture) return capture;
 
-    if (empty.length === 0) return null;
+    // --- 2. Defend: fill last liberty of our group ---
+    const defend = findGroupLastLiberty(board, validMoves, liberties, size, 'X');
+    if (defend) return defend;
 
-    // 1. Defend: fill our group's last liberty
-    const defendMove = findLastLiberty(board, size, ourStones, 'X');
-    if (defendMove && isSafe(board, size, defendMove.x, defendMove.y)) {
-        return defendMove;
-    }
-
-    // 2. Attack: fill enemy group's last liberty (capture)
-    const attackMove = findLastLiberty(board, size, theirStones, 'O');
-    if (attackMove && isSafe(board, size, attackMove.x, attackMove.y)) {
-        return attackMove;
-    }
-
-    // 3. Expand: play adjacent to our stones, safe moves only
-    const expansionMoves = empty.filter(n =>
-        isAdjacentTo(n, ourStones) && isSafe(board, size, n.x, n.y)
-    );
-    if (expansionMoves.length > 0) {
-        // Pick the one adjacent to most of our stones (consolidate groups)
-        expansionMoves.sort((a, b) => countAdjacent(b, ourStones) - countAdjacent(a, ourStones));
-        return expansionMoves[0];
-    }
-
-    // 4. Any safe empty node in corners/edges first
-    const safeMoves = empty.filter(n => isSafe(board, size, n.x, n.y));
-    if (safeMoves.length > 0) {
-        safeMoves.sort((a, b) => edgeScore(b, size) - edgeScore(a, size));
-        return safeMoves[0];
-    }
-
-    return null;                                                                     // Pass
-}
-
-function getEmptyNodes(board, size) {
-    const nodes = [];
+    // --- 3. Expand: score all valid moves ---
+    const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
-            if (board[x] && board[x][y] === '.') nodes.push({ x, y });
+            if (!validMoves[x] || !validMoves[x][y]) continue;
+            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
         }
     }
-    return nodes;
+
+    if (candidates.length === 0) return null;
+
+    candidates.sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+
+    // Pass if best move scores very low
+    if (best.score < -5) return null;
+
+    return best;
 }
 
-function getStones(board, size, color) {
-    const stones = [];
+/**
+ * Find the last liberty of any group of `color` stones, returning that node if it's a valid move.
+ * Uses flood-fill validated by getLiberties() grid for accurate count.
+ */
+function findGroupLastLiberty(board, validMoves, liberties, size, color) {
+    const visited = new Set();
+
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
-            if (board[x] && board[x][y] === color) stones.push({ x, y });
+            if (!board[x] || board[x][y] !== color) continue;
+            const key = x + ',' + y;
+            if (visited.has(key)) continue;
+
+            const queue  = [{ x, y }];
+            const group  = [];
+            const libSet = new Map();
+
+            while (queue.length > 0) {
+                const curr = queue.pop();
+                const k    = curr.x + ',' + curr.y;
+                if (visited.has(k)) continue;
+                visited.add(k);
+                group.push(curr);
+
+                for (const adj of getAdjacent(curr.x, curr.y, size)) {
+                    const cell = board[adj.x] && board[adj.x][adj.y];
+                    if (cell === '.') {
+                        libSet.set(adj.x + ',' + adj.y, adj);
+                    } else if (cell === color) {
+                        queue.push(adj);
+                    }
+                }
+            }
+
+            // Only act when exactly 1 liberty AND engine confirms low liberties on a group stone
+            const groupAtRisk = group.some(s => liberties[s.x] && liberties[s.x][s.y] === 1);
+            if (groupAtRisk && libSet.size === 1) {
+                const node = libSet.values().next().value;
+                if (validMoves[node.x] && validMoves[node.x][node.y]) {
+                    return node;
+                }
+            }
         }
     }
-    return stones;
+
+    return null;
 }
 
-function getLiberties(board, size, x, y) {
-    const adj = getAdjacent(x, y, size);
-    return adj.filter(n => board[n.x] && board[n.x][n.y] === '.');
+/**
+ * Score a candidate move. Higher = better.
+ *
+ * Factors:
+ * - Positional value: 3rd-line positions score highest (good Go opening principle)
+ * - Territory: adjacent contested ('?') = +3, adjacent enemy-controlled = +4, adjacent ours = +1
+ * - Connectivity: adjacent to our stones = +2 each
+ */
+function moveScore(board, controlled, x, y, size) {
+    let score = positionalScore(x, y, size);
+
+    for (const n of getAdjacent(x, y, size)) {
+        const cell = board[n.x] && board[n.x][n.y];
+        const ctrl = controlled[n.x] && controlled[n.x][n.y];
+
+        if (cell === '.') {
+            if (ctrl === '?') score += 3;
+            if (ctrl === 'O') score += 4;
+            if (ctrl === 'X') score += 1;
+        }
+        if (cell === 'X') score += 2;
+    }
+
+    return score;
+}
+
+/**
+ * Positional score: peaks at the 3rd line from each edge (ideal opening positions).
+ * Corners (0 distance from edge) and deep centre both score lower.
+ */
+function positionalScore(x, y, size) {
+    const ideal = Math.floor(size / 4);
+    const dx    = Math.min(x, size - 1 - x);
+    const dy    = Math.min(y, size - 1 - y);
+    return 6 - Math.abs(dx - ideal) - Math.abs(dy - ideal);
 }
 
 function getAdjacent(x, y, size) {
@@ -239,82 +291,4 @@ function getAdjacent(x, y, size) {
     if (y > 0)        result.push({ x, y: y - 1 });
     if (y < size - 1) result.push({ x, y: y + 1 });
     return result;
-}
-
-/**
- * Find a group with exactly 1 liberty (about to die).
- * Returns that liberty node (the move that would fill/defend it).
- */
-function findLastLiberty(board, size, stones, color) {
-    const visited = new Set();
-
-    for (const stone of stones) {
-        const key = stone.x + ',' + stone.y;
-        if (visited.has(key)) continue;
-
-        // Flood-fill to find whole connected group
-        const group    = [];
-        const queue    = [stone];
-        const libSet   = new Set();
-
-        while (queue.length > 0) {
-            const curr = queue.pop();
-            const k    = curr.x + ',' + curr.y;
-            if (visited.has(k)) continue;
-            visited.add(k);
-            group.push(curr);
-
-            for (const adj of getAdjacent(curr.x, curr.y, size)) {
-                const cell = board[adj.x] && board[adj.x][adj.y];
-                if (cell === '.') libSet.add(adj.x + ',' + adj.y + ':' + adj.x + ':' + adj.y);
-                else if (cell === color) queue.push(adj);
-            }
-        }
-
-        if (libSet.size === 1) {
-            const [, xs, ys] = libSet.values().next().value.split(':');
-            return { x: parseInt(xs), y: parseInt(ys) };
-        }
-    }
-
-    return null;
-}
-
-/**
- * Returns true if placing a stone at (x, y) won't immediately be captured.
- * (i.e., after placement the stone/group has ≥2 liberties, OR it captures an enemy group)
- */
-function isSafe(board, size, x, y) {
-    const adj = getAdjacent(x, y, size);
-
-    // Count liberties this placement would have
-    let libs = 0;
-    let capturesEnemy = false;
-
-    for (const n of adj) {
-        const cell = board[n.x] && board[n.x][n.y];
-        if (cell === '.') {
-            libs++;
-        } else if (cell === 'O') {
-            // Check if this adjacent enemy group has only 1 liberty (we capture it)
-            const enemyLibs = getLiberties(board, size, n.x, n.y);
-            if (enemyLibs.length === 1) capturesEnemy = true;
-        }
-    }
-
-    return libs >= 2 || capturesEnemy;
-}
-
-function isAdjacentTo(node, stones) {
-    return stones.some(s => Math.abs(s.x - node.x) + Math.abs(s.y - node.y) === 1);
-}
-
-function countAdjacent(node, stones) {
-    return stones.filter(s => Math.abs(s.x - node.x) + Math.abs(s.y - node.y) === 1).length;
-}
-
-function edgeScore(node, size) {
-    // Prefer corners > edges > centre for territory
-    const distToEdge = Math.min(node.x, size - 1 - node.x, node.y, size - 1 - node.y);
-    return -distToEdge;                                                              // Negative: closer to edge scores higher
 }
