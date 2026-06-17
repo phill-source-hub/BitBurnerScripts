@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.6
+ * Version: 3.16.7
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -23,6 +23,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.7 - Filter MCTS candidates with ≤1 liberty after placement: stones in atari
+ *             immediately after being placed get captured next turn, causing the same
+ *             cell to be replayed repeatedly (X=0 boards). Skip those candidates.
  *   v3.16.6 - Log every move/pass/error to diagnose persistent X=0 boards.
  *   v3.16.5 - Fix critical passing bug: remove bestRate<0.05 early-pass threshold.
  *             When MCTS was pessimistic, we passed every turn → X=0, O=~45 boards.
@@ -104,7 +107,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.6';
+const VERSION       = '3.16.7';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -287,8 +290,11 @@ function pickMove(board, validMoves, liberties, controlled, size) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
             const idx   = x * size + y;
             const after = _applyMove(flat, idx, 1, t);
+            if (!after) continue;  // suicide or invalid after capture resolution
+            // Skip moves that leave our group at ≤1 liberty — easily captured next turn
+            if (_groupLibs(after, idx, size, t) <= 1) continue;
             // Territory gain: how many more X-controlled points after this move
-            const terr  = after ? Math.max(0, _score(after, t).xs - baseXs) : 0;
+            const terr  = Math.max(0, _score(after, t).xs - baseXs);
             const h     = moveScore(board, controlled, x, y, size) + TERR_WEIGHT * terr;
             candidates.push({ x, y, idx, h });
         }
@@ -547,6 +553,27 @@ function findEyeBlockingMove(board, validMoves, controlled, size) {
 // All board operations run on flat Uint8Arrays (no NS calls).
 // Color encoding: 0=empty, 1=X(us/Black), 2=O(enemy/White), 3=dead('#').
 // =============================================================================
+
+/**
+ * Count distinct empty (0) cells adjacent to the connected group containing
+ * the stone at `idx` on the flat board. Returns liberty count of that group.
+ */
+function _groupLibs(arr, idx, size, t) {
+    const color   = arr[idx];
+    if (!color) return 0;
+    const visited = new Uint8Array(size * size);
+    const libs    = new Set();
+    const queue   = [idx];
+    visited[idx]  = 1;
+    while (queue.length) {
+        const cur = queue.pop();
+        for (const n of t[cur]) {
+            if (arr[n] === 0)               { libs.add(n); }
+            else if (arr[n] === color && !visited[n]) { visited[n] = 1; queue.push(n); }
+        }
+    }
+    return libs.size;
+}
 
 const MCTS_CANDIDATES = 8;    // top-N moves by combined score to simulate
 const MCTS_ROLLOUTS   = 100;  // random rollouts per candidate (↑ from 40 — tighter CI)
