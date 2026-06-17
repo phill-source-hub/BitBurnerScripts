@@ -40,6 +40,10 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.10.0 - Dictionary attacks: FreshInstall_1.0, Laika4, TopPass, EuroZone Free.
+ *            PHP 5.4 (SortedEchoVuln): generate unique permutations of sorted digits.
+ *            BellaCuore high-diff: brute-force integer range from parsed roman numeral bounds.
+ *            Rename isInstantlySolvable→isHandledInline to cover multi-attempt inline models.
  *   v1.9.0 - Extend crackInline to one-shot solve 9 additional models from d.data:
  *            CloudBlare(tm) digit-extraction, EchoVuln hint-parse, BinaryEncoded decode,
  *            OrdoXenos XOR-decrypt, OctantVoxel base-convert, MathML expression eval,
@@ -130,6 +134,26 @@ const CRACK_WORKER_RAM_GB  = 1.1;                                               
 const PORT_CRACK_RESULT    = 7;                                                     // Crack workers write { host, password } results here
 
 
+// --- Dictionary tables (sourced from bitburner-src DarkNet/models/dictionaryData.ts) ---
+const DICT_DEFAULT   = ['admin', 'password', '0000', '12345'];
+const DICT_DOG_NAMES = ['fido', 'spot', 'rover', 'max'];
+const DICT_EU        = ['Austria','Belgium','Bulgaria','Croatia','Republic of Cyprus','Czech Republic',
+                        'Denmark','Estonia','Finland','France','Germany','Greece','Hungary','Ireland',
+                        'Italy','Latvia','Lithuania','Luxembourg','Malta','Netherlands','Poland',
+                        'Portugal','Romania','Slovakia','Slovenia','Spain','Sweden'];
+const DICT_COMMON    = ['123456','password','12345678','qwerty','123456789','12345','1234','111111',
+                        '1234567','dragon','123123','baseball','abc123','football','monkey','letmein',
+                        '696969','shadow','master','666666','qwertyuiop','123321','mustang','1234567890',
+                        'michael','654321','superman','1qaz2wsx','7777777','121212','0','qazwsx','123qwe',
+                        'trustno1','jordan','jennifer','zxcvbnm','asdfgh','hunter','buster','soccer',
+                        'harley','batman','andrew','tigger','sunshine','iloveyou','2000','charlie',
+                        'robert','thomas','hockey','ranger','daniel','starwars','112233','george',
+                        'computer','michelle','jessica','pepper','1111','zxcvbn','555555','11111111',
+                        '131313','freedom','777777','pass','maggie','159753','aaaaaa','ginger',
+                        'princess','joshua','cheese','amanda','summer','love','ashley','6969','nicole',
+                        'chelsea','biteme','matthew','access','yankees','987654321','dallas','austin',
+                        'thunder','taylor','matrix'];
+
 // --- Server state map (in-memory, survives across mutations) ---
 // Map<host, { password: string|null, phishPid: number, stasisLinked: boolean, crackPid: number }>
 const state = new Map();
@@ -146,7 +170,7 @@ let canExecSelf = false;
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.9.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.10.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -163,7 +187,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.9.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.10.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -268,8 +292,8 @@ async function runCycle(ns, flags) {
 
         // --- CRACK ---
         if (!s.password) {
-            // Models solvable in one attempt from d.data always go inline, even with canExecSelf
-            if (isInstantlySolvable(d)) {
+            // Models handled by crackInline logic (one-shot or dictionary) bypass the crack worker
+            if (isHandledInline(d)) {
                 const pw = await crackInline(ns, host, d);
                 if (pw !== null) { s.password = pw; saveCredToPort(ns, host, pw); }
                 continue;
@@ -418,11 +442,11 @@ async function launchCrackWorker(ns, host, d) {
 }
 
 /**
- * Returns true if the server model can be cracked in one authenticate() attempt
- * using only the information in d.data / d.passwordHint. These models bypass the
- * crack worker even when canExecSelf is true.
+ * Returns true if crackInline() has explicit logic for this model (one-shot or
+ * dictionary/permutation). These models bypass the crack worker even when
+ * canExecSelf is true — the worker only does generic numeric brute-force.
  */
-function isInstantlySolvable(d) {
+function isHandledInline(d) {
     switch (d.modelId) {
         case 'ZeroLogon':
         case 'CloudBlare(tm)':
@@ -433,9 +457,13 @@ function isInstantlySolvable(d) {
         case 'MathML':
         case 'PrimeTime 2':
         case 'Pr0verFl0':
+        case 'BellaCuore':       // both low-diff (single roman) and high-diff (range brute-force)
+        case 'FreshInstall_1.0': // 4-word default password dictionary
+        case 'Laika4':           // 4-word dog name dictionary
+        case 'TopPass':          // 95-word common password dictionary
+        case 'EuroZone Free':    // 27 EU country names
+        case 'PHP 5.4':          // sorted digits → permutations (avoids sequential brute-force)
             return true;
-        case 'BellaCuore':
-            return !d.data.includes(',');                                            // Low difficulty: single roman numeral in d.data
         default:
             return false;
     }
@@ -568,6 +596,53 @@ async function crackInline(ns, host, d) {
         const r = await ns.dnet.authenticate(host, pw);
         if (r.success) { log(ns, 'CRACKED ' + host + ' BufferOverflow'); return pw; }
         log(ns, 'BufferOverflow FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- BellaCuore high difficulty: d.data = "minRoman,maxRoman" → brute-force the integer range ---
+    if (d.modelId === 'BellaCuore' && d.data.includes(',')) {
+        const parts = d.data.split(',');
+        const min = romanToInt(parts[0]);
+        const max = romanToInt(parts[1]);
+        log(ns, 'RomanNumeral range ' + host + ' ' + min + '..' + max + ' (' + (max - min + 1) + ' values)');
+        for (let i = min; i <= max; i++) {
+            const pw = String(i);
+            const r  = await ns.dnet.authenticate(host, pw);
+            if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+            if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') await ns.sleep(RATE_LIMIT_SLEEP_MS);
+        }
+        log(ns, 'RomanNumeral range exhausted ' + host);
+        return null;
+    }
+
+    // --- PHP 5.4 (SortedEchoVuln): d.data = sorted digits → try all unique permutations ---
+    if (d.modelId === 'PHP 5.4') {
+        const sorted = d.data || '';
+        const perms  = uniquePermutations(sorted);
+        log(ns, 'SortedEcho ' + host + ' sorted=' + sorted + ' → ' + perms.length + ' permutations');
+        for (const pw of perms) {
+            const r = await ns.dnet.authenticate(host, pw);
+            if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+            if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') await ns.sleep(RATE_LIMIT_SLEEP_MS);
+        }
+        log(ns, 'SortedEcho permutations exhausted ' + host);
+        return null;
+    }
+
+    // --- Dictionary models ---
+    const dict = d.modelId === 'FreshInstall_1.0' ? DICT_DEFAULT
+               : d.modelId === 'Laika4'            ? DICT_DOG_NAMES
+               : d.modelId === 'TopPass'            ? DICT_COMMON
+               : d.modelId === 'EuroZone Free'      ? DICT_EU
+               : null;
+    if (dict) {
+        log(ns, 'Dict crack ' + host + ' model=' + model + ' (' + dict.length + ' words)');
+        for (const pw of dict) {
+            const r = await ns.dnet.authenticate(host, pw);
+            if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+            if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') await ns.sleep(RATE_LIMIT_SLEEP_MS);
+        }
+        log(ns, 'Dict exhausted ' + host);
         return null;
     }
 
@@ -845,6 +920,29 @@ async function propagateToStasisLinked(ns, skip) {
 // =============================================================================
 // Crack helpers
 // =============================================================================
+
+/**
+ * Returns all unique permutations of the characters in str, sorted lexicographically.
+ * Used for PHP 5.4 (SortedEchoVuln) where d.data is the sorted password digits.
+ */
+function uniquePermutations(str) {
+    const chars = str.split('').sort();
+    const result = [];
+    const used   = new Array(chars.length).fill(false);
+
+    function build(current) {
+        if (current.length === chars.length) { result.push(current); return; }
+        for (let i = 0; i < chars.length; i++) {
+            if (used[i]) continue;
+            if (i > 0 && chars[i] === chars[i - 1] && !used[i - 1]) continue;      // Skip duplicate branches
+            used[i] = true;
+            build(current + chars[i]);
+            used[i] = false;
+        }
+    }
+    build('');
+    return result;
+}
 
 /**
  * Parse a number encoded in base N. Supports fractional bases.
