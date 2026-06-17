@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.4
+ * Version: 3.16.5
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -13,7 +13,7 @@
  *     2.   Defend:       fill the last liberty of any of our groups
  *     3.   Defend early: fill liberty of our group at <=2 libs (enemy adjacent)
  *     4.   MCTS:         rank top-N by territory-aware heuristic via rollouts
- *     5.   Pass:         no valid move or <5% win rate across all candidates
+ *     5.   Pass:         no valid moves remain (game engine ends naturally)
  *
  *   Opponent selection: starts at easiest ('Netburners'), advances after
  *   WIN_THRESHOLD consecutive wins to the next opponent. Tracks wins/losses
@@ -23,6 +23,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.5 - Fix critical passing bug: remove bestRate<0.05 early-pass threshold.
+ *             When MCTS was pessimistic, we passed every turn → X=0, O=~45 boards.
+ *             Now always play MCTS best candidate; game ends naturally when both pass.
  *   v3.16.4 - Log final board state + score on every loss for pattern analysis.
  *   v3.16.3 - Remove smother (step 3.7): overrode MCTS even when territory move
  *             was better. SS win rate near 0% with smother active. Isolates
@@ -100,7 +103,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.4';
+const VERSION       = '3.16.5';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -306,8 +309,9 @@ function pickMove(board, validMoves, liberties, controlled, size) {
         if (rate > bestRate) { bestRate = rate; bestMove = cand; }
     }
 
-    // Pass only if we're completely losing across all candidates
-    return bestRate < 0.05 ? null : bestMove;
+    // Always play the best candidate — passing hands the board to the enemy.
+    // The game engine ends naturally when both players pass; we never force it.
+    return bestMove;
 }
 
 /**
