@@ -24,9 +24,12 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
- *   v3.4.0 - Chain growth bonus +3→+6 (compete with territory bonuses); positional
- *            ideal floor(size/4)→floor(size/3) — prefer 3rd line (7→2) for more board
- *            influence vs Slum Snakes chain-growth strategy. 27% win rate prompted this.
+ *   v3.5.0 - Add findChainLiberty() as dedicated step 4: always extend our largest
+ *            chain (mirrors Slum Snakes' growth() exactly) before territory expand.
+ *            Revert positional to 2nd-line (floor(size/4)) — 3rd-line made it worse.
+ *            Chain bonus in moveScore fallback reduced back to +3 (step 4 handles it).
+ *   v3.4.0 - Chain growth bonus +3→+6; positional ideal floor(size/4)→floor(size/3).
+ *            Both changes hurt Slum Snakes win rate (24% vs 27%); reverted in v3.5.0.
  *   v3.3.0 - Chain growth: getLargestChainId() from getChains(); moves adjacent to
  *            our largest connected group score +3 extra, mirroring Slum Snakes'
  *            growth() priority. Helps build one strong group vs both chain-growth
@@ -61,7 +64,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.4.0';
+const VERSION       = '3.5.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -207,10 +210,18 @@ function pickMove(board, validMoves, liberties, controlled, chains, size) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
-    // Pre-compute largest friendly chain ID — moves that extend it score higher
+    // Pre-compute largest friendly chain ID — used in step 4 and moveScore
     const largestChainId = getLargestChainId(board, chains, size);
 
-    // --- 4. Expand: score all valid moves ---
+    // --- 4. Grow our largest chain — mirrors Slum Snakes' growth() strategy ---
+    //        Best liberty of our largest chain, scored by future empty neighbours.
+    //        Always prefer extending our strongest group over chasing raw territory.
+    if (largestChainId !== null) {
+        const grow = findChainLiberty(board, validMoves, chains, largestChainId, size);
+        if (grow) return grow;
+    }
+
+    // --- 5. Expand: score all valid moves when no chain liberty exists ---
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
@@ -333,12 +344,40 @@ function moveScore(board, controlled, chains, largestChainId, x, y, size) {
         if (cell === 'X') {
             score += 2;
             if (largestChainId !== null && chains[n.x] && chains[n.x][n.y] === largestChainId) {
-                score += 6;                                                          // Extend largest chain — mirrors Slum Snakes growth() priority
+                score += 3;                                                          // Small bonus for chain adjacency in fallback expand step
             }
         }
     }
 
     return score;
+}
+
+/**
+ * Returns the best valid move to extend our largest chain (mirrors Slum Snakes' growth()).
+ * Scores each liberty of the chain by number of empty neighbours — more empty = more future libs.
+ */
+function findChainLiberty(board, validMoves, chains, largestChainId, size) {
+    let bestMove  = null;
+    let bestScore = -1;
+
+    for (let x = 0; x < size; x++) {
+        for (let y = 0; y < size; y++) {
+            if (!validMoves[x] || !validMoves[x][y]) continue;
+            const adj = getAdjacent(x, y, size);
+            const adjacentToChain = adj.some(n =>
+                board[n.x] && board[n.x][n.y] === 'X' &&
+                chains[n.x] && chains[n.x][n.y] === largestChainId
+            );
+            if (!adjacentToChain) continue;
+            const emptyNeighbors = adj.filter(n => board[n.x] && board[n.x][n.y] === '.').length;
+            if (emptyNeighbors > bestScore) {
+                bestScore = emptyNeighbors;
+                bestMove  = { x, y };
+            }
+        }
+    }
+
+    return bestMove;
 }
 
 /**
@@ -366,7 +405,7 @@ function getLargestChainId(board, chains, size) {
  * On a 7x7 board, 2nd-line play provides edge-backed groups harder for TBH to surround.
  */
 function positionalScore(x, y, size) {
-    const ideal = Math.floor(size / 3);                                             // 3rd-line preferred (7→2, 9→3, 13→4) — more board influence than 2nd-line
+    const ideal = Math.floor(size / 4);                                             // 2nd-line preferred (7→1, 9→2, 13→3) — edge-backed groups harder to surround
     const dx    = Math.min(x, size - 1 - x);
     const dy    = Math.min(y, size - 1 - y);
     return 6 - Math.abs(dx - ideal) - Math.abs(dy - ideal);
