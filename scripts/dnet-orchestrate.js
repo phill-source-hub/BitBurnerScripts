@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.4.0
+ * Version: 1.12.0
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -40,6 +40,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.12.0 - ensurePhish skips ORCH_RAM_GB reservation when stasis slots are
+ *            exhausted — no point holding 5 GB for an orchestrator that can't
+ *            be propagated. Frees headroom on low-RAM depth-0 servers.
  *   v1.11.0 - Heartbleed credential harvest: drain logs from every visible server each
  *            cycle, parse "Connecting to host:password" entries, save discovered
  *            passwords to port 6. Handles hostnames containing colons (greedy match).
@@ -173,7 +176,7 @@ let canExecSelf = false;
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.11.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.12.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -345,7 +348,7 @@ async function runCycle(ns, flags) {
 
         // --- PHISH ---
         if (!flags['no-phish']) {
-            s.phishPid = await ensurePhish(ns, host, s.phishPid);
+            s.phishPid = await ensurePhish(ns, host, s.phishPid, stasisUsed >= stasisLimit);
         }
 
         // --- STASIS ---
@@ -764,17 +767,19 @@ async function freeMemory(ns, host, initialBlocked) {
  * @param {number} prevPid - PID from a previous deploy, or 0 if none
  * @returns {Promise<number>} Active PID, or 0 if deploy failed
  */
-async function ensurePhish(ns, host, prevPid) {
+async function ensurePhish(ns, host, prevPid, stasisFull) {
     if (prevPid > 0 && ns.isRunning(prevPid)) return prevPid;                      // Script still alive — no action needed
 
     const maxRam    = ns.getServerMaxRam(host);
     const usedRam   = ns.getServerUsedRam(host);
     const freeRam   = maxRam - usedRam;
-    const available = freeRam - ORCH_RAM_GB;                                        // Reserve ORCH_RAM_GB for a future orchestrator propagating deeper
+    const reserve   = stasisFull ? 0 : ORCH_RAM_GB;                                // No point reserving headroom when stasis slots are exhausted
+    const available = freeRam - reserve;
     const threads   = Math.floor(available / PHISH_RAM_GB);                         // Fill remaining RAM with phish threads
 
     if (threads < 1) {
-        log(ns, 'PHISH SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free after ' + ORCH_RAM_GB + ' GB reserved (need ' + PHISH_RAM_GB + ')');
+        log(ns, 'PHISH SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free'
+            + (reserve > 0 ? ' after ' + reserve + ' GB reserved' : '') + ' (need ' + PHISH_RAM_GB + ')');
         return 0;
     }
 
