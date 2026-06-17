@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.10.0
+ * Version: 3.11.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -72,7 +72,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.10.0';
+const VERSION       = '3.11.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -244,7 +244,7 @@ function pickMove(board, validMoves, liberties, controlled, size, opponent) {
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size, opponent) });
+            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
         }
     }
 
@@ -342,33 +342,27 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
  * Score a candidate move. Higher = better.
  *
  * Opponent-aware weights:
- *   Slum Snakes — build own territory, stay neutral on theirs.
- *                 O=0 (don't flee OR chase their chain), X=+3 (extend our enclosed regions),
- *                 ?=+2. Opening book (step 4) claims corners first. Their chain is a snake
- *                 shape that doesn't enclose territory — we just need to form closed regions.
- *   All others  — contest strategy (v3.2.0): play near enemy territory to block growth.
- *                 Netburners/TBH/etc never pass — playing near their chain creates boundary walls.
- *                 O: +4  X: +1  ?: +3  (proven 64% vs Netburners)
+ *   All opponents — v3.2.0 contest weights: O=+4 X=+1 ?=+3. Proven ~64% vs Netburners,
+ *                  ~37% vs Slum Snakes. Playing near enemy territory creates boundary walls
+ *                  that limit their chain's expansion. Mild openness bonus as tiebreaker.
  */
-function moveScore(board, controlled, x, y, size, opponent) {
+function moveScore(board, controlled, x, y, size) {
     let score = positionalScore(x, y, size);
-
-    const ss = opponent === 'Slum Snakes';
 
     for (const n of getAdjacent(x, y, size)) {
         const cell = board[n.x] && board[n.x][n.y];
         const ctrl = controlled[n.x] && controlled[n.x][n.y];
 
         if (cell === '.') {
-            if (ctrl === 'X') score += ss ? 3 : 1;
-            if (ctrl === '?') score += ss ? 2 : 3;
-            if (ctrl === 'O') score += ss ? 0 : 4;   // Neutral vs SS (don't flee); contest vs others
+            if (ctrl === 'X') score += 1;
+            if (ctrl === '?') score += 3;
+            if (ctrl === 'O') score += 4;
         }
         if (cell === 'X') score += 2;
     }
 
-    // Openness: empty cells within Manhattan-2 — mild bonus for all opponents.
-    const opennessWeight = ss ? 0.3 : 0.2;
+    // Openness: empty cells within Manhattan-2 — mild tiebreaker for open positions.
+    const opennessWeight = 0.2;
     for (let dx = -2; dx <= 2; dx++) {
         for (let dy = -2; dy <= 2; dy++) {
             if (Math.abs(dx) + Math.abs(dy) > 2) continue;
