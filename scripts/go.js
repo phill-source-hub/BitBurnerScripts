@@ -24,6 +24,15 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.20.0 - Biased rollouts: MCTS simulations now prioritise capture (fill enemy's
+ *             last liberty) then defend (fill own last liberty) before falling back to
+ *             random. Random rollouts cannot detect systematic surrounding — they produce
+ *             misleadingly high win rates for positions where our group is being enclosed.
+ *             Biased rollouts give MCTS a realistic signal, steering it away from moves
+ *             that lead to capture chains. Eye heuristic (v3.19.0) removed — 45% vs
+ *             47% baseline over 90 games; eye bonus only affected greedy pre-MCTS scoring.
+ *   v3.19.0 - Eye creation heuristic in moveScore (+8 true eye, +2 proto-eye). 45% over
+ *             90 games — below 47% baseline. Rolled back from main strategy, removed.
  *   v3.17.1 - Opening anchor (step 3.5): first 3 moves build connected group near
  *             center before MCTS territory contest. Move 1 = closest valid cell to
  *             center with ≥3 libs. Move 2-3 = best adjacent extension by liberty count.
@@ -122,7 +131,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.19.0';
+const VERSION       = '3.20.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -519,31 +528,7 @@ function moveScore(board, controlled, x, y, size) {
         if (cell === 'X') score += 4;
     }
 
-    score += eyeCreationBonus(board, x, y, size);
     return score;
-}
-
-/**
- * Bonus for moves that create or advance eye formation.
- * For each empty cell adjacent to (x,y), counts how many of its neighbors would be
- * X or board-edge after placing at (x,y). Full eye (4) = +8, proto-eye (3) = +2.
- */
-function eyeCreationBonus(board, x, y, size) {
-    let bonus = 0;
-    for (const n of getAdjacent(x, y, size)) {
-        if (board[n.x] && board[n.x][n.y] !== '.') continue; // only empty cells
-        const nAdj  = getAdjacent(n.x, n.y, size);
-        const walls = 4 - nAdj.length;            // board-edge sides count as X
-        let xCount  = walls;
-        for (const nn of nAdj) {
-            if (nn.x === x && nn.y === y) { xCount++; continue; } // our new stone
-            const c = board[nn.x] && board[nn.x][nn.y];
-            if (c === 'X' || c === '#') xCount++;
-        }
-        if (xCount >= 4) bonus += 8;  // empty cell becomes a true eye
-        else if (xCount === 3) bonus += 2;  // one more stone away from an eye
-    }
-    return bonus;
 }
 
 /**
@@ -809,8 +794,43 @@ function _score(arr, t) {
 }
 
 /**
- * Run one random rollout starting from `arr` with `toPlay` moving next.
- * Both players choose uniformly from valid (non-suicide) moves.
+ * Find all last-liberty cells for groups of `color` at exactly 1 liberty.
+ * Returns array of empty cell indices that are the sole liberty of some group.
+ * Used by biased rollout to prioritise capture and defend moves.
+ */
+function _urgentMoves(arr, color, t, N) {
+    const checked = new Uint8Array(N);
+    const result  = [];
+    for (let i = 0; i < N; i++) {
+        if (arr[i] !== color || checked[i]) continue;
+        // Flood-fill group, track libs
+        const stack = [i];
+        const group = [];
+        const seen  = new Uint8Array(N);
+        seen[i]     = 1;
+        let libCount = 0, lastLib = -1;
+        while (stack.length) {
+            const cur = stack.pop();
+            group.push(cur);
+            for (const n of t[cur]) {
+                if (seen[n]) continue;
+                seen[n] = 1;
+                if (arr[n] === 0) { libCount++; lastLib = n; }
+                else if (arr[n] === color) stack.push(n);
+            }
+        }
+        for (const g of group) checked[g] = 1;
+        if (libCount === 1) result.push(lastLib);
+    }
+    return result;
+}
+
+/**
+ * Run one biased rollout starting from `arr` with `toPlay` moving next.
+ * Priority: (1) capture enemy group at 1 lib, (2) defend own group at 1 lib,
+ * (3) random valid move. Biased rollouts give MCTS a realistic signal about
+ * whether a position leads to capture — random rollouts cannot detect
+ * systematic surrounding and produce high-variance, misleading win rates.
  * Returns true if X (us, color=1) wins.
  */
 function _rollout(arr, toPlay, t, size) {
@@ -820,21 +840,43 @@ function _rollout(arr, toPlay, t, size) {
     const N    = size * size;
 
     for (let depth = 0; depth < MCTS_DEPTH; depth++) {
-        // Collect empty cells and Fisher-Yates shuffle for random order
-        const empties = [];
-        for (let i = 0; i < N; i++) if (cur[i] === 0) empties.push(i);
-        for (let i = empties.length - 1; i > 0; i--) {
-            const j   = (Math.random() * (i + 1)) | 0;
-            const tmp = empties[i]; empties[i] = empties[j]; empties[j] = tmp;
+        const enemy = player === 1 ? 2 : 1;
+        let played  = false;
+
+        // Priority 1: capture (fill last lib of enemy group)
+        const captures = _urgentMoves(cur, enemy, t, N);
+        if (captures.length > 0) {
+            const idx  = captures[(Math.random() * captures.length) | 0];
+            const next = _applyMove(cur, idx, player, t);
+            if (next) { cur = next; played = true; passes = 0; }
         }
 
-        let played = false;
-        for (const idx of empties) {
-            const next = _applyMove(cur, idx, player, t);
-            if (next) { cur = next; played = true; passes = 0; break; }
+        // Priority 2: defend (fill last lib of own group)
+        if (!played) {
+            const defends = _urgentMoves(cur, player, t, N);
+            if (defends.length > 0) {
+                const idx  = defends[(Math.random() * defends.length) | 0];
+                const next = _applyMove(cur, idx, player, t);
+                if (next) { cur = next; played = true; passes = 0; }
+            }
         }
+
+        // Priority 3: random valid move
+        if (!played) {
+            const empties = [];
+            for (let i = 0; i < N; i++) if (cur[i] === 0) empties.push(i);
+            for (let i = empties.length - 1; i > 0; i--) {
+                const j = (Math.random() * (i + 1)) | 0;
+                const tmp = empties[i]; empties[i] = empties[j]; empties[j] = tmp;
+            }
+            for (const idx of empties) {
+                const next = _applyMove(cur, idx, player, t);
+                if (next) { cur = next; played = true; passes = 0; break; }
+            }
+        }
+
         if (!played) { if (++passes >= 2) break; }
-        player = player === 1 ? 2 : 1;
+        player = enemy;
     }
 
     const { xs, os } = _score(cur, t);

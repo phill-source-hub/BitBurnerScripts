@@ -18,6 +18,7 @@
  * No gate. No imports. Runs from day 1.
  *
  * Changelog:
+ *   v1.1.0 - Fix LZ decompression (wrong chunk-type detection); fix LZ compression (enforce alternating literal/ref chunks).
  *   v1.0.0 - Initial version. Covers all 32 contract types.
  *
  * Flags:
@@ -31,7 +32,7 @@
  *   codingcontract.* functions cost 0 GB each
  */
 
-const VERSION  = '1.0.0';
+const VERSION  = '1.1.0';
 const INTERVAL = 60 * 1000;                                                         // Rescan interval in ms
 
 export async function main(ns) {
@@ -536,33 +537,8 @@ function solveRLECompress(s) {
 }
 
 // --- Compression II: LZ Decompression ---
-// data: string. Return decompressed string.
-function solveLZDecompress(s) {
-    let out = '', i = 0;
-    while (i < s.length) {
-        const type = parseInt(s[i++]);
-        if (type === 0) break;
-        if (i - 1 < s.length && parseInt(s[i - 1]) % 2 === 1) {
-            // Literal chunk
-            const len = type;
-            out += s.slice(i, i + len);
-            i   += len;
-        } else {
-            // Back-reference chunk
-            const len    = type;
-            const offset = parseInt(s[i++]);
-            for (let j = 0; j < len; j++) {
-                out += out[out.length - offset];
-            }
-        }
-    }
-    return out;
-}
-
-// --- Compression II: LZ Decompression (corrected LZSS format) ---
-// The game's LZ decompression alternates between literal and backreference chunks.
 // data: string encoded as alternating (literal_len)(literal)(ref_len)(offset)...
-function solveLZDecompressFixed(s) {
+function solveLZDecompress(s) {
     let out = '', i = 0;
     while (i < s.length) {
         const litLen = parseInt(s[i++]);
@@ -579,37 +555,59 @@ function solveLZDecompressFixed(s) {
 
 // --- Compression III: LZ Compression ---
 // data: string. Return LZSS-compressed string (minimise length).
+// Format strictly alternates: literal-chunk, ref-chunk, literal-chunk, ref-chunk...
+// Literal chunk: digit L (0-9) followed by L literal chars.
+// Ref chunk:     digit 0 (empty) OR digit L followed by offset digit (1-9).
 function solveLZCompress(s) {
-    // DP approach: dp[i] = shortest encoding of s[0..i-1]
-    const n  = s.length;
-    const dp = new Array(n + 1).fill(null);
-    dp[0]    = '';
+    const n = s.length;
+    // dp[i][phase]: shortest encoding reaching position i.
+    // phase 0 = next chunk is literal, phase 1 = next chunk is reference.
+    const dp = Array.from({ length: n + 1 }, () => [null, null]);
+    dp[0][0] = '';
+
     for (let i = 0; i <= n; i++) {
-        if (dp[i] === null) continue;
-        // Literal chunk of length 1-9
-        for (let len = 1; len <= 9 && i + len <= n; len++) {
-            const next = dp[i] + len + s.slice(i, i + len);
-            if (dp[i + len] === null || next.length < dp[i + len].length) {
-                dp[i + len] = next;
-            }
-        }
-        // Back-reference chunk: find matches in output
-        for (let offset = 1; offset <= Math.min(i, 9); offset++) {
-            let matchLen = 0;
-            while (matchLen < 9 && i + matchLen < n && s[i + matchLen] === s[i - offset + (matchLen % offset)]) {
-                matchLen++;
-            }
-            for (let len = 1; len <= matchLen; len++) {
-                // Prepend empty literal if previous chunk was also a ref (must alternate)
-                const base = dp[i];
-                const next = base + len + '' + offset;
-                if (dp[i + len] === null || next.length < dp[i + len].length) {
-                    dp[i + len] = next;
+        for (let phase = 0; phase <= 1; phase++) {
+            const cur = dp[i][phase];
+            if (cur === null) continue;
+            const next = 1 - phase;
+            if (phase === 0) {
+                // Emit empty literal '0' (stay at i, advance to ref phase)
+                const e = cur + '0';
+                if (dp[i][1] === null || e.length < dp[i][1].length) dp[i][1] = e;
+                // Emit literal of length 1-9
+                for (let len = 1; len <= 9 && i + len <= n; len++) {
+                    const enc = cur + len + s.slice(i, i + len);
+                    if (dp[i + len][1] === null || enc.length < dp[i + len][1].length) {
+                        dp[i + len][1] = enc;
+                    }
+                }
+            } else {
+                // Emit empty reference '0' (stay at i, advance to literal phase)
+                const e = cur + '0';
+                if (dp[i][0] === null || e.length < dp[i][0].length) dp[i][0] = e;
+                // Emit back-reference: length 1-9, offset 1-9
+                for (let offset = 1; offset <= Math.min(i, 9); offset++) {
+                    let matchLen = 0;
+                    while (matchLen < 9 && i + matchLen < n &&
+                           s[i + matchLen] === s[i - offset + (matchLen % offset)]) {
+                        matchLen++;
+                    }
+                    for (let len = 1; len <= matchLen; len++) {
+                        const enc = cur + len + '' + offset;
+                        if (dp[i + len][0] === null || enc.length < dp[i + len][0].length) {
+                            dp[i + len][0] = enc;
+                        }
+                    }
                 }
             }
         }
     }
-    return dp[n] || '';
+
+    const r0 = dp[n][0], r1 = dp[n][1];
+    if (r0 === null && r1 === null) return '';
+    if (r0 === null) return r1;
+    if (r1 === null) return r0;
+    return r0.length <= r1.length ? r0 : r1;
 }
 
 // --- Encryption I: Caesar Cipher ---
