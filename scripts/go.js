@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.8
+ * Version: 3.16.9
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -12,7 +12,7 @@
  *     1.   Capture:      fill the last liberty of any enemy group
  *     2.   Defend:       fill the last liberty of any of our groups
  *     3.   Defend early: fill liberty of our group at <=2 libs (enemy adjacent)
- *     4.   MCTS:         rank top-N by territory-aware heuristic via rollouts
+ *     4.   Best heuristic: pick top candidate by territory+connection+position score
  *     5.   Pass:         no valid moves remain (game engine ends naturally)
  *
  *   Opponent selection: starts at easiest ('Netburners'), advances after
@@ -23,6 +23,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.9 - Drop MCTS rollout selection: random rollouts don't model systematic
+ *             surrounding and override the heuristic with noise. Return top heuristic
+ *             candidate directly. Heuristic: position + territory gain + X-adj×8 + '#'×2.
  *   v3.16.8 - Increase friendly-adjacency bonus: X+2→+8, add '#'+2 (wall bonus).
  *             Scattered isolated stones were getting surrounded; low +2 weight let
  *             territory/enemy-control bonuses dominate, discouraging group connection.
@@ -110,7 +113,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.8';
+const VERSION       = '3.16.9';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -306,25 +309,9 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     if (candidates.length === 0) return null;
 
     candidates.sort((a, b) => b.h - a.h);
-    const top  = candidates.slice(0, Math.min(MCTS_CANDIDATES, candidates.length));
-
-    let bestMove = top[0];
-    let bestRate = -1;
-
-    for (const cand of top) {
-        const after = _applyMove(flat, cand.idx, 1, t);
-        if (!after) continue;
-        let wins = 0;
-        for (let r = 0; r < MCTS_ROLLOUTS; r++) {
-            if (_rollout(after, 2, t, size)) wins++;
-        }
-        const rate = wins / MCTS_ROLLOUTS;
-        if (rate > bestRate) { bestRate = rate; bestMove = cand; }
-    }
-
-    // Always play the best candidate — passing hands the board to the enemy.
-    // The game engine ends naturally when both players pass; we never force it.
-    return bestMove;
+    // Return the top heuristic candidate directly — MCTS rollouts with random play
+    // don't model systematic surrounding and override better heuristic choices with noise.
+    return candidates[0];
 }
 
 /**
