@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.0
+ * Version: 3.16.1
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -12,8 +12,6 @@
  *     1.   Capture:      fill the last liberty of any enemy group
  *     2.   Defend:       fill the last liberty of any of our groups
  *     3.   Defend early: fill liberty of our group at <=2 libs (enemy adjacent)
- *     3.5. Eye create:   split our controlled territory into 2 enclosed regions
- *     3.6. Eye block:    deny enemy's vital eye-splitting move in their territory
  *     3.7. Smother:      safely attack enemy groups at exactly 2 libs
  *     4.   MCTS:         rank top-N by territory-aware heuristic via rollouts
  *     5.   Pass:         no valid move or <5% win rate across all candidates
@@ -26,6 +24,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.1 - Revert eye create/block (steps 3.5/3.6): caused 26% SS win rate (vs 37%
+ *             baseline). Eye block played weak moves inside O-controlled territory.
+ *             Functions retained for future refinement. Keep: '#' fix + smother.
  *   v3.16.0 - Four new improvements from doc review:
  *             1. Fix '#' dead cells in _toFlat (encoded as 0 = playable; now 3 = blocked).
  *             2. Eye creation (step 3.5): find moves that split our controlled territory
@@ -95,7 +96,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.0';
+const VERSION       = '3.16.1';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -238,14 +239,6 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     //        is already adjacent — no point defending groups under no actual pressure ---
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
-
-    // --- 3.5. Eye create: split our enclosed territory into 2 separate eyes ---
-    const eyeCreate = findEyeCreationMove(board, validMoves, controlled, size);
-    if (eyeCreate) return eyeCreate;
-
-    // --- 3.6. Eye block: deny enemy's vital eye-splitting point ---
-    const eyeBlock = findEyeBlockingMove(board, validMoves, controlled, size);
-    if (eyeBlock) return eyeBlock;
 
     // --- 3.7. Smother: safely attack enemy groups at exactly 2 libs ---
     const smother = findGroupAtLiberties(board, validMoves, liberties, size, 'O', 2, false, true);
