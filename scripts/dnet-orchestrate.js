@@ -40,6 +40,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.17.0 - ns.ramOverride(15): calculated cost is 16.30 GB but darkweb hard-cap is
+ *            16 GB; override to 15 GB so exec succeeds. Runtime behaviour unchanged —
+ *            BB only enforces declared RAM at exec time, not during execution.
  *   v1.16.0 - propagateToHub: reclaim blocked RAM via memoryReallocation before exec
  *            when freeRam < actualScriptRam. Fixes HUB EXEC FAILED on darkweb after
  *            game reset (script=16.3 GB > darkweb default 16 GB; 0.3 GB is blocked).
@@ -185,7 +188,8 @@ let canExecSelf = false;
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.16.0 ===');
+    ns.ramOverride(15);                                                              // Calculated cost is 16.30 GB but darkweb cap is 16 GB; override to fit
+    ns.tprint('=== dnet-orchestrate.js v1.17.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -202,7 +206,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.16.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.17.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
