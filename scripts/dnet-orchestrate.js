@@ -913,9 +913,13 @@ async function propagateToHub(ns, host) {
         return;
     }
 
+    const actualRam = ns.getScriptRam(ORCH_SCRIPT, 'home');
+    const maxRamHub = ns.getServerMaxRam(host);
+    const usedRamHub = ns.getServerUsedRam(host);
+    log(ns, 'HUB exec ' + host + ' scriptRam=' + actualRam.toFixed(2) + ' hub=' + usedRamHub.toFixed(1) + '/' + maxRamHub.toFixed(1) + ' GB');
     const pid = ns.exec(ORCH_SCRIPT, host, 1);
     if (pid === 0) {
-        log(ns, 'HUB EXEC FAILED ' + host);
+        log(ns, 'HUB EXEC FAILED ' + host + ' — need ' + actualRam.toFixed(2) + ' GB, hub has ' + (maxRamHub - usedRamHub).toFixed(2) + ' free');
         return;
     }
 
