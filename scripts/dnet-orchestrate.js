@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.12.0
+ * Version: 1.13.0
  *
  * Master darknet controller: crack → memfree → deploy phish → stasis.
  *
@@ -40,6 +40,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.13.0 - propagateToHub always SCPs before checking isRunning — hub nodes
+ *            now receive script updates every cycle and pick them up on next
+ *            natural restart rather than lagging until a mutation kills them.
  *   v1.12.0 - ensurePhish skips ORCH_RAM_GB reservation when stasis slots are
  *            exhausted — no point holding 5 GB for an orchestrator that can't
  *            be propagated. Frees headroom on low-RAM depth-0 servers.
@@ -176,7 +179,7 @@ let canExecSelf = false;
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.12.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.13.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -882,20 +885,20 @@ async function propagateToHub(ns, host) {
         }
     }
 
-    // Step 2: propagate orchestrator — stasis is either confirmed or unavailable
+    // Step 2: always SCP latest version — keeps file on disk current so next restart picks up updates
+    const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host, 'home');
+    if (!scpOk) {
+        log(ns, 'HUB SCP FAILED ' + host);
+        return;
+    }
+
     if (ns.isRunning(ORCH_SCRIPT, host)) {
-        return;                                                                      // Already running — nothing to do
+        return;                                                                      // Already running — file updated, will use new version on next restart
     }
 
     const freeRam = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
     if (freeRam < ORCH_RAM_GB) {
         log(ns, 'HUB SKIP ' + host + ' — only ' + freeRam.toFixed(1) + ' GB free (need ~' + ORCH_RAM_GB + ')');
-        return;
-    }
-
-    const scpOk = await ns.scp([ORCH_SCRIPT, LIB_UTILS], host, 'home');
-    if (!scpOk) {
-        log(ns, 'HUB SCP FAILED ' + host);
         return;
     }
 
