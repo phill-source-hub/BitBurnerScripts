@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.17.7';
+const VERSION       = '3.17.8';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -314,19 +314,22 @@ function findAnchorMove(board, validMoves, size) {
 
     // Moves 2-N: extend our existing group — pick valid adjacent cell with most resulting libs
     const xSet = new Set(xStones.map(s => s.x * size + s.y));
-    let best = null, bestScore = -1;
+    let best = null, bestScore = -Infinity;
     for (const stone of xStones) {
         for (const n of getAdjacent(stone.x, stone.y, size)) {
             if (!validMoves[n.x] || !validMoves[n.x][n.y]) continue;
-            // Count how many empty cells are adjacent to the candidate (future group libs)
-            const candidateLibs = getAdjacent(n.x, n.y, size).filter(
+            const adj = getAdjacent(n.x, n.y, size);
+            // Skip cells directly adjacent to an enemy stone — placing there is usually immediately dangerous
+            if (adj.some(a => board[a.x] && board[a.x][a.y] === 'O')) continue;
+            // Count how many empty cells + friendly stones are adjacent (future group libs)
+            const candidateLibs = adj.filter(
                 a => (board[a.x] && board[a.x][a.y] === '.') ||
                      xSet.has(a.x * size + a.y)
             ).length;
             if (candidateLibs < 2) continue;
-            // Prefer interior cells: penalise proximity to edge (edge cells are easier to surround)
+            // Strongly prefer interior cells — edge cells are trivially surrounded
             const edgeDist = Math.min(n.x, size - 1 - n.x, n.y, size - 1 - n.y);
-            const score = candidateLibs * 10 + edgeDist;
+            const score = candidateLibs + edgeDist * 5;
             if (score > bestScore) { bestScore = score; best = { x: n.x, y: n.y }; }
         }
     }
