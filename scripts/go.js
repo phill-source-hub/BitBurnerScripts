@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.2
+ * Version: 3.16.3
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -12,7 +12,6 @@
  *     1.   Capture:      fill the last liberty of any enemy group
  *     2.   Defend:       fill the last liberty of any of our groups
  *     3.   Defend early: fill liberty of our group at <=2 libs (enemy adjacent)
- *     3.7. Smother:      safely attack enemy groups at exactly 2 libs
  *     4.   MCTS:         rank top-N by territory-aware heuristic via rollouts
  *     5.   Pass:         no valid move or <5% win rate across all candidates
  *
@@ -24,6 +23,9 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.16.3 - Remove smother (step 3.7): overrode MCTS even when territory move
+ *             was better. SS win rate near 0% with smother active. Isolates
+ *             v3.15.0 territory+MCTS as clean baseline to measure from.
  *   v3.16.2 - Opponent demotion: after WIN_THRESHOLD consecutive losses drop back one
  *             opponent. Removes --auto-advance/--no-advance flags (always on).
  *             Prevents getting stuck on TBH (9% win rate) after advancing from SS.
@@ -97,7 +99,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.2';
+const VERSION       = '3.16.3';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -248,10 +250,6 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     //        is already adjacent — no point defending groups under no actual pressure ---
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
-
-    // --- 3.7. Smother: safely attack enemy groups at exactly 2 libs ---
-    const smother = findGroupAtLiberties(board, validMoves, liberties, size, 'O', 2, false, true);
-    if (smother) return smother;
 
     // --- 4. Territory-scored MCTS: candidates ranked by heuristic + territory gain,
     //        then final selection via Monte Carlo rollouts. ---
