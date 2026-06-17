@@ -140,7 +140,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.21.0';
+const VERSION       = '3.21.1';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -291,7 +291,7 @@ function interpretResult(state) {
 // Opening anchor
 // =============================================================================
 
-const ANCHOR_STONES = 5;    // connected opening; MCTS takes over but stays adjacent to group
+const ANCHOR_STONES = 3;    // connected opening; fewer anchor moves lets MCTS spread out sooner
 
 /**
  * Opening book: build a connected anchor group near center for the first ANCHOR_STONES moves.
