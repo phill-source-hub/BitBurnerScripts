@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.16.9
+ * Version: 3.17.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -12,7 +12,7 @@
  *     1.   Capture:      fill the last liberty of any enemy group
  *     2.   Defend:       fill the last liberty of any of our groups
  *     3.   Defend early: fill liberty of our group at <=2 libs (enemy adjacent)
- *     4.   Best heuristic: pick top candidate by territory+connection+position score
+ *     4.   MCTS:         rank top-N by territory-aware heuristic via rollouts
  *     5.   Pass:         no valid moves remain (game engine ends naturally)
  *
  *   Opponent selection: starts at easiest ('Netburners'), advances after
@@ -23,6 +23,10 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.17.0 - Revert to v3.16.3 strategy (MCTS + original heuristic weights).
+ *             v3.16.7–9 changes (≤1 lib filter, X×8 bonus, no-MCTS) all degraded
+ *             performance. Code comment explicitly warns X>+2 degrades SS win rate.
+ *             Keep: '#' fix, board logging on loss, opponent demotion.
  *   v3.16.9 - Drop MCTS rollout selection: random rollouts don't model systematic
  *             surrounding and override the heuristic with noise. Return top heuristic
  *             candidate directly. Heuristic: position + territory gain + X-adj×8 + '#'×2.
@@ -113,7 +117,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.16.9';
+const VERSION       = '3.17.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -296,11 +300,8 @@ function pickMove(board, validMoves, liberties, controlled, size) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
             const idx   = x * size + y;
             const after = _applyMove(flat, idx, 1, t);
-            if (!after) continue;  // suicide or invalid after capture resolution
-            // Skip moves that leave our group at ≤1 liberty — easily captured next turn
-            if (_groupLibs(after, idx, size, t) <= 1) continue;
             // Territory gain: how many more X-controlled points after this move
-            const terr  = Math.max(0, _score(after, t).xs - baseXs);
+            const terr  = after ? Math.max(0, _score(after, t).xs - baseXs) : 0;
             const h     = moveScore(board, controlled, x, y, size) + TERR_WEIGHT * terr;
             candidates.push({ x, y, idx, h });
         }
@@ -309,9 +310,24 @@ function pickMove(board, validMoves, liberties, controlled, size) {
     if (candidates.length === 0) return null;
 
     candidates.sort((a, b) => b.h - a.h);
-    // Return the top heuristic candidate directly — MCTS rollouts with random play
-    // don't model systematic surrounding and override better heuristic choices with noise.
-    return candidates[0];
+    const top = candidates.slice(0, Math.min(MCTS_CANDIDATES, candidates.length));
+
+    let bestMove = top[0];
+    let bestRate = -1;
+
+    for (const cand of top) {
+        const after = _applyMove(flat, cand.idx, 1, t);
+        if (!after) continue;
+        let wins = 0;
+        for (let r = 0; r < MCTS_ROLLOUTS; r++) {
+            if (_rollout(after, 2, t, size)) wins++;
+        }
+        const rate = wins / MCTS_ROLLOUTS;
+        if (rate > bestRate) { bestRate = rate; bestMove = cand; }
+    }
+
+    // Always play best candidate — game ends naturally when both players pass.
+    return bestMove;
 }
 
 /**
@@ -423,8 +439,7 @@ function moveScore(board, controlled, x, y, size) {
             if (ctrl === 'O') score += 4;
             if (ctrl === 'X') score += 1;
         }
-        if (cell === 'X') score += 8;   // strongly prefer connecting to our own groups
-        if (cell === '#') score += 2;   // dead cells act as free liberties (walls)
+        if (cell === 'X') score += 2;
     }
 
     return score;
