@@ -40,6 +40,11 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.9.0 - Extend crackInline to one-shot solve 9 additional models from d.data:
+ *            CloudBlare(tm) digit-extraction, EchoVuln hint-parse, BinaryEncoded decode,
+ *            OrdoXenos XOR-decrypt, OctantVoxel base-convert, MathML expression eval,
+ *            PrimeTime 2 prime factor, BellaCuore roman numeral, Pr0verFl0 buffer trick.
+ *            Instantly-solvable models bypass crack worker even when canExecSelf.
  *   v1.8.0 - Self-session on startup: connectToSession(selfHost, password) using
  *            real password from port 6. Sets canExecSelf=true on success.
  *            When canExecSelf: exec dnet-crack-worker.js with N threads for N×
@@ -141,7 +146,7 @@ let canExecSelf = false;
 
 /** @param {NS} ns */
 export async function main(ns) {
-    ns.tprint('=== dnet-orchestrate.js v1.8.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.9.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -158,7 +163,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.8.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.9.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -263,6 +268,13 @@ async function runCycle(ns, flags) {
 
         // --- CRACK ---
         if (!s.password) {
+            // Models solvable in one attempt from d.data always go inline, even with canExecSelf
+            if (isInstantlySolvable(d)) {
+                const pw = await crackInline(ns, host, d);
+                if (pw !== null) { s.password = pw; saveCredToPort(ns, host, pw); }
+                continue;
+            }
+
             if (canExecSelf) {
                 // Self-session active — exec threaded crack worker for N× speed
                 if (s.crackPid > 0 && ns.isRunning(s.crackPid)) {
@@ -277,16 +289,14 @@ async function runCycle(ns, flags) {
                     continue;
                 }
                 s.crackPid = await launchCrackWorker(ns, host, d);
-                continue;                                                            // Result arrives on port 7 next cycle
-            } else {
-                // No self-session (hub) — crack inline sequentially
-                const pw = await crackInline(ns, host, d);
-                if (pw) {
-                    s.password = pw;
-                    saveCredToPort(ns, host, pw);
-                }
-                continue;
+                if (s.crackPid > 0) continue;                                       // Result arrives on port 7 next cycle
+                // Worker not launched (unsupported model) — fall through to inline
             }
+
+            // No self-session (hub) or worker not applicable — crack inline sequentially
+            const pw = await crackInline(ns, host, d);
+            if (pw !== null) { s.password = pw; saveCredToPort(ns, host, pw); }
+            continue;
         }
 
         // Ensure session is active — may have been lost if mutation killed the server
@@ -408,29 +418,160 @@ async function launchCrackWorker(ns, host, d) {
 }
 
 /**
- * Inline sequential brute-force — used when exec onto this host is not permitted.
- * Tries all numeric passwords up to AUTO_CRACK_MAX_LEN, one attempt per iteration.
- * authenticate() already yields to the engine each call, so no extra sleep needed.
- * @param {NS} ns - Netscript object
- * @param {string} host - Hostname of the target server
- * @param {object} d - DarknetServerDetails for the target
- * @returns {Promise<string|null>} Password on success, null on failure or non-crackable
+ * Returns true if the server model can be cracked in one authenticate() attempt
+ * using only the information in d.data / d.passwordHint. These models bypass the
+ * crack worker even when canExecSelf is true.
+ */
+function isInstantlySolvable(d) {
+    switch (d.modelId) {
+        case 'ZeroLogon':
+        case 'CloudBlare(tm)':
+        case 'DeskMemo_3.1':
+        case '110100100':
+        case 'OrdoXenos':
+        case 'OctantVoxel':
+        case 'MathML':
+        case 'PrimeTime 2':
+        case 'Pr0verFl0':
+            return true;
+        case 'BellaCuore':
+            return !d.data.includes(',');                                            // Low difficulty: single roman numeral in d.data
+        default:
+            return false;
+    }
+}
+
+/**
+ * Inline crack — attempts one or more authenticate() calls to crack the target.
+ * For instantly-solvable models, computes the answer from d.data in a single attempt.
+ * For brute-forceable numeric models (≤ AUTO_CRACK_MAX_LEN), iterates all combos.
+ * @param {NS} ns
+ * @param {string} host
+ * @param {object} d - DarknetServerDetails
+ * @returns {Promise<string|null>} password string (possibly "") on success, null on failure
  */
 async function crackInline(ns, host, d) {
     const model = d.modelId || 'unknown';
 
-    // ZeroLogon model (or any passwordLength=0 non-hub): always empty password
+    // --- ZeroLogon: empty password ---
     if (d.modelId === 'ZeroLogon' || d.passwordLength === 0) {
-        log(ns, 'ZeroLogon crack: ' + host + ' (model=' + model + ')');
+        log(ns, 'ZeroLogon crack: ' + host);
         const r = await ns.dnet.authenticate(host, '');
-        if (r.success) {
-            log(ns, 'CRACKED ' + host + ' = "" (ZeroLogon)');
-            return '';
-        }
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = "" (ZeroLogon)'); return ''; }
         log(ns, 'ZeroLogon FAILED ' + host + ' code=' + r.code);
         return null;
     }
 
+    // --- CloudBlare(tm): digits hidden in filler chars ---
+    if (d.modelId === 'CloudBlare(tm)') {
+        const pw = (d.data || '').replace(/\D/g, '');
+        log(ns, 'CloudBlare ' + host + ' data=' + d.data + ' → ' + pw);
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        log(ns, 'CloudBlare FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- DeskMemo_3.1 (EchoVuln): hint is "The password is <pw>" ---
+    if (d.modelId === 'DeskMemo_3.1') {
+        const parts = (d.passwordHint || '').trim().split(/\s+/);
+        const pw = parts[parts.length - 1];
+        log(ns, 'EchoVuln ' + host + ' hint last-word → ' + pw);
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        log(ns, 'EchoVuln FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- 110100100 (BinaryEncoded): d.data = space-separated 8-bit binary chars ---
+    if (d.modelId === '110100100') {
+        const pw = (d.data || '').split(' ').map(b => String.fromCharCode(parseInt(b, 2))).join('');
+        log(ns, 'BinaryEncoded ' + host + ' → ' + pw);
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        log(ns, 'BinaryEncoded FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- OrdoXenos (XOR encrypted): d.data = "encryptedPw;mask1 mask2 ..." ---
+    if (d.modelId === 'OrdoXenos') {
+        const semi = (d.data || '').indexOf(';');
+        const encPw   = d.data.slice(0, semi);
+        const maskStr = d.data.slice(semi + 1);
+        const masks   = maskStr.split(' ').map(m => parseInt(m, 2));
+        const pw = encPw.split('').map((c, i) => String.fromCharCode(c.charCodeAt(0) ^ (masks[i] || 0))).join('');
+        log(ns, 'XOR ' + host + ' enc=' + encPw + ' → ' + pw);
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        log(ns, 'XOR FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- OctantVoxel (ConvertToBase10): d.data = "base,encodedPw" ---
+    if (d.modelId === 'OctantVoxel') {
+        const comma = (d.data || '').indexOf(',');
+        const base  = parseFloat(d.data.slice(0, comma));
+        const enc   = d.data.slice(comma + 1);
+        const pw    = String(Math.round(parseBaseN(enc, base)));
+        log(ns, 'Base' + base + ' ' + host + ' ' + enc + ' → ' + pw);
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        log(ns, 'Base conversion FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- MathML (parsedExpression): d.data = arithmetic expression ---
+    if (d.modelId === 'MathML') {
+        const expr = (d.data || '')
+            .replace(/ҳ/g, '*').replace(/÷/g, '/').replace(/➕/g, '+').replace(/➖/g, '-');
+        const safe = expr.replace(/[^0-9+\-*/(). ]/g, '');                          // Strip any code injection (ns.exit etc)
+        let pw = null;
+        try {
+            const result = Function('return (' + safe + ')')();                     // eslint-disable-line no-new-func
+            pw = String(result);
+        } catch (_) {
+            log(ns, 'MathML parse error ' + host + ' expr=' + expr);
+            return null;
+        }
+        log(ns, 'MathML ' + host + ' expr=' + safe + ' → ' + pw);
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        log(ns, 'MathML FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- PrimeTime 2 (LargestPrimeFactor): d.data = target number ---
+    if (d.modelId === 'PrimeTime 2') {
+        const n  = parseInt(d.data || '0');
+        const pw = String(largestPrimeFactor(n));
+        log(ns, 'PrimeFactor ' + host + ' n=' + n + ' → ' + pw);
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        log(ns, 'PrimeFactor FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- BellaCuore (RomanNumeral, low difficulty): d.data = single roman numeral ---
+    if (d.modelId === 'BellaCuore' && !d.data.includes(',')) {
+        const pw = String(romanToInt(d.data));
+        log(ns, 'RomanNumeral ' + host + ' ' + d.data + ' → ' + pw);
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        log(ns, 'RomanNumeral FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- Pr0verFl0 (BufferOverflow): send "ˍ" * passwordLength * 2 to trick buffer comparison ---
+    if (d.modelId === 'Pr0verFl0') {
+        const pw = 'ˍ'.repeat(d.passwordLength * 2);                           // U+02CD modifier letter low macron — matches buffer padding char
+        log(ns, 'BufferOverflow ' + host + ' len=' + d.passwordLength + ' trick');
+        const r = await ns.dnet.authenticate(host, pw);
+        if (r.success) { log(ns, 'CRACKED ' + host + ' BufferOverflow'); return pw; }
+        log(ns, 'BufferOverflow FAILED ' + host + ' code=' + r.code);
+        return null;
+    }
+
+    // --- Numeric brute force (existing) ---
     if (d.passwordFormat !== 'numeric' || d.passwordLength > AUTO_CRACK_MAX_LEN) {
         log(ns, 'MANUAL ' + host + ' — model=' + model + ' format=' + d.passwordFormat
             + ' len=' + d.passwordLength + '  hint: ' + (d.passwordHint || 'none'));
@@ -443,13 +584,8 @@ async function crackInline(ns, host, d) {
     for (let i = 0; i < total; i++) {
         const pw = String(i).padStart(d.passwordLength, '0');
         const r  = await ns.dnet.authenticate(host, pw);
-        if (r.success) {
-            log(ns, 'CRACKED ' + host + ' = ' + pw);
-            return pw;
-        }
-        if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') {
-            await ns.sleep(RATE_LIMIT_SLEEP_MS);
-        }
+        if (r.success) { log(ns, 'CRACKED ' + host + ' = ' + pw); return pw; }
+        if (r.code === 'TIMEOUT' || r.code === 'RATE_LIMITED') { await ns.sleep(RATE_LIMIT_SLEEP_MS); }
     }
 
     log(ns, 'CRACK FAILED ' + host + ' — exhausted ' + total + ' combos');
@@ -703,6 +839,55 @@ async function propagateToStasisLinked(ns, skip) {
 
         log(ns, 'STASIS EXPAND propagated orchestrate to ' + host + ' pid=' + pid);
     }
+}
+
+
+// =============================================================================
+// Crack helpers
+// =============================================================================
+
+/**
+ * Parse a number encoded in base N. Supports fractional bases.
+ * Character alphabet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+ */
+function parseBaseN(str, base) {
+    const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let result = 0;
+    let dotIdx  = str.indexOf('.');
+    let intLen  = dotIdx === -1 ? str.length : dotIdx;
+    let digit   = intLen - 1;                                                        // Place value of first char
+
+    for (let i = 0; i < str.length; i++) {
+        if (str[i] === '.') { continue; }
+        const val = chars.indexOf(str[i].toUpperCase());
+        if (val === -1) continue;
+        result += val * Math.pow(base, digit);
+        digit--;
+    }
+    return result;
+}
+
+/** Returns the largest prime factor of n. */
+function largestPrimeFactor(n) {
+    let largest = 1;
+    let d = 2;
+    while (d * d <= n) {
+        while (n % d === 0) { largest = d; n = Math.floor(n / d); }
+        d++;
+    }
+    return n > 1 ? n : largest;
+}
+
+/** Converts a roman numeral string to an integer. */
+function romanToInt(s) {
+    const map = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+    let result = 0;
+    for (let i = 0; i < s.length; i++) {
+        const curr = map[s[i]] || 0;
+        const next = map[s[i + 1]] || 0;
+        result += curr < next ? -curr : curr;
+    }
+    return result;
 }
 
 
