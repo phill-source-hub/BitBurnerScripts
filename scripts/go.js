@@ -24,6 +24,10 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.7.0 - Revert to v3.2.0 pure territory scoring. All chain-based experiments
+ *            (v3.3–v3.6) degraded Slum Snakes from 37% to 24–25%; interdict put
+ *            isolated stones adjacent to enemy chain = easy captures. v3.2.0 remains
+ *            the best baseline. Slum Snakes ceiling is ~37% with this approach.
  *   v3.6.0 - Replace own-chain-grow step with enemy-chain-interdict step: play at the
  *            best liberty of the enemy's largest chain (blocks growth() AIs without
  *            abandoning territory). Revert moveScore to pure v3.2.0 (no chain bonus).
@@ -68,7 +72,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.6.0';
+const VERSION       = '3.7.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -214,19 +218,7 @@ function pickMove(board, validMoves, liberties, controlled, chains, size) {
     const defend2 = findGroupAtLiberties(board, validMoves, liberties, size, 'X', 2, true);
     if (defend2) return defend2;
 
-    // Pre-compute chain IDs for scoring
-    const largestChainId      = getLargestChainId(board, chains, size, 'X');
-    const enemyLargestChainId = getLargestChainId(board, chains, size, 'O');
-
-    // --- 4. Interdict enemy chain — play at the best open liberty of their largest group.
-    //        This blocks growth() AIs (Netburners, Slum Snakes) from extending their chain
-    //        while simultaneously placing us in good territory. ---
-    if (enemyLargestChainId !== null) {
-        const interdict = findChainLiberty(board, validMoves, chains, enemyLargestChainId, size);
-        if (interdict) return interdict;
-    }
-
-    // --- 5. Expand: score all valid moves ---
+    // --- 4. Expand: score all valid moves ---
     const candidates = [];
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
