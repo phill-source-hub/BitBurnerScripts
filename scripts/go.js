@@ -1,6 +1,6 @@
 /**
  * go.js
- * Version: 3.11.0
+ * Version: 3.12.0
  *
  * Netburner Protocol (Go) automation for PhlanxOS.
  *
@@ -72,7 +72,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.11.0';
+const VERSION       = '3.12.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -244,7 +244,7 @@ function pickMove(board, validMoves, liberties, controlled, size, opponent) {
     for (let x = 0; x < size; x++) {
         for (let y = 0; y < size; y++) {
             if (!validMoves[x] || !validMoves[x][y]) continue;
-            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size) });
+            candidates.push({ x, y, score: moveScore(board, controlled, x, y, size, opponent) });
         }
     }
 
@@ -342,21 +342,25 @@ function findGroupAtLiberties(board, validMoves, liberties, size, color, thresho
  * Score a candidate move. Higher = better.
  *
  * Opponent-aware weights:
- *   All opponents — v3.2.0 contest weights: O=+4 X=+1 ?=+3. Proven ~64% vs Netburners,
- *                  ~37% vs Slum Snakes. Playing near enemy territory creates boundary walls
- *                  that limit their chain's expansion. Mild openness bonus as tiebreaker.
+ *   Slum Snakes — opening book claims corners first (step 4); scoring must follow through.
+ *                 X=+4 strongly extends from our stones (build connected corner regions).
+ *                 O=+2 still contests somewhat but won't pull us away from corner extensions.
+ *                 Without high X, O=+4 abandons our corner stones to chase SS territory.
+ *   All others  — v3.2.0: O=+4 X=+1 ?=+3. Proven ~64% vs Netburners.
  */
-function moveScore(board, controlled, x, y, size) {
+function moveScore(board, controlled, x, y, size, opponent) {
     let score = positionalScore(x, y, size);
+
+    const ss = opponent === 'Slum Snakes';
 
     for (const n of getAdjacent(x, y, size)) {
         const cell = board[n.x] && board[n.x][n.y];
         const ctrl = controlled[n.x] && controlled[n.x][n.y];
 
         if (cell === '.') {
-            if (ctrl === 'X') score += 1;
+            if (ctrl === 'X') score += ss ? 4 : 1;
             if (ctrl === '?') score += 3;
-            if (ctrl === 'O') score += 4;
+            if (ctrl === 'O') score += ss ? 2 : 4;
         }
         if (cell === 'X') score += 2;
     }
