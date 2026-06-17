@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.20.0
+ * Version: 1.21.0
  *
  * Master darknet controller: crack → memfree → relay → phish → stasis.
  *
@@ -44,7 +44,10 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
- *   v1.20.0 - Relay chaining: ensureOrchRelay() deploys orchestrate on every
+ *   v1.21.0 - DEFER after partial memfree: any residual blockedRam (even 0.04 GB from
+            code=351 rate-limit) prevents exec. Re-read blockedRam after freeMemory;
+            if still > 0, skip relay/phish/stasis and retry next mutation.
+   v1.20.0 - Relay chaining: ensureOrchRelay() deploys orchestrate on every
  *            cracked darknet server with >= ORCH_EXEC_RAM_GB (15 GB) free.
  *            Relay nodes skip phish; their orchestrate instances discover and
  *            crack deeper neighbours independently. Depth expands without
@@ -204,7 +207,7 @@ let canExecSelf = false;
 /** @param {NS} ns */
 export async function main(ns) {
     ns.ramOverride(15);                                                              // Calculated cost is 16.30 GB but darkweb cap is 16 GB; override to fit
-    ns.tprint('=== dnet-orchestrate.js v1.20.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.21.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -221,7 +224,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.20.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.21.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -372,6 +375,12 @@ async function runCycle(ns, flags) {
         // --- MEMFREE ---
         if (d.blockedRam > 0) {
             await freeMemory(ns, host, d.blockedRam);
+            // Any blocked RAM remaining prevents exec (BB rejects exec when blockedRam > 0,
+            // even 0.04 GB residual after a rate-limited memfree). Defer until next cycle.
+            if (ns.dnet.getServerDetails(host).blockedRam > 0) {
+                log(ns, 'DEFER ' + host + ' — blocked RAM still remains, will retry next mutation');
+                continue;
+            }
         }
 
         // --- RELAY: deploy orchestrate so this server discovers its own neighbours ---
