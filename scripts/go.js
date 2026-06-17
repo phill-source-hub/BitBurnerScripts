@@ -24,6 +24,15 @@
  *   larger boards (slower but more territory = more reward per win).
  *
  * Changelog:
+ *   v3.21.0 - Two improvements to MCTS quality:
+ *             1. Safety candidate injection: liberties of our group at ≤4 libs are
+ *                always included in the MCTS evaluation pool, even if they rank outside
+ *                the top-8 heuristically. Prevents MCTS ignoring critical defensive moves
+ *                because territory scoring ranks them low.
+ *             2. Rollout pre-atari extension: priority 3 in biased rollouts now extends
+ *                groups at ≤2 libs before falling back to random. Groups at 2 libs are
+ *                one move from atari; simulating the extension gives MCTS a realistic
+ *                view of positions where our group is being enclosed.
  *   v3.20.0 - Biased rollouts: MCTS simulations now prioritise capture (fill enemy's
  *             last liberty) then defend (fill own last liberty) before falling back to
  *             random. Random rollouts cannot detect systematic surrounding — they produce
@@ -131,7 +140,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.20.2';
+const VERSION       = '3.21.0';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -398,6 +407,20 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
 
     candidates.sort((a, b) => b.h - a.h);
     const top = candidates.slice(0, Math.min(MCTS_CANDIDATES, candidates.length));
+
+    // Safety injection: always evaluate liberties of our most-threatened group,
+    // even if they rank outside the top-N heuristically. Prevents MCTS from
+    // ignoring a critical defensive move because it scored low for territory.
+    const N         = size * size;
+    const safetySet = new Set(_urgentMoves(flat, 1, t, N, 4));
+    const topSet    = new Set(top.map(c => c.idx));
+    for (const idx of safetySet) {
+        if (!topSet.has(idx)) {
+            const c = candidates.find(ca => ca.idx === idx);
+            if (c) { top.push(c); topSet.add(idx); }
+        }
+    }
+
     let bestMove = top[0];
     let bestRate = -1;
 
@@ -794,33 +817,36 @@ function _score(arr, t) {
 }
 
 /**
- * Find all last-liberty cells for groups of `color` at exactly 1 liberty.
- * Returns array of empty cell indices that are the sole liberty of some group.
- * Used by biased rollout to prioritise capture and defend moves.
+ * Find liberty cells for groups of `color` with at most `threshold` liberties.
+ * threshold=1: returns the sole liberty of groups in atari (immediate capture/defend).
+ * threshold=2: also includes groups at 2 libs (pre-atari extension).
+ * threshold=4: used for safety candidate injection in MCTS.
+ * Returns array of empty cell indices (may contain duplicates for overlapping groups).
  */
-function _urgentMoves(arr, color, t, N) {
+function _urgentMoves(arr, color, t, N, threshold) {
     const checked = new Uint8Array(N);
     const result  = [];
     for (let i = 0; i < N; i++) {
         if (arr[i] !== color || checked[i]) continue;
-        // Flood-fill group, track libs
-        const stack = [i];
-        const group = [];
-        const seen  = new Uint8Array(N);
-        seen[i]     = 1;
-        let libCount = 0, lastLib = -1;
+        const stack  = [i];
+        const group  = [];
+        const seen   = new Uint8Array(N);
+        seen[i]      = 1;
+        const libs   = [];
         while (stack.length) {
             const cur = stack.pop();
             group.push(cur);
             for (const n of t[cur]) {
                 if (seen[n]) continue;
                 seen[n] = 1;
-                if (arr[n] === 0) { libCount++; lastLib = n; }
+                if (arr[n] === 0) libs.push(n);
                 else if (arr[n] === color) stack.push(n);
             }
         }
         for (const g of group) checked[g] = 1;
-        if (libCount === 1) result.push(lastLib);
+        if (libs.length <= threshold) {
+            for (const lib of libs) result.push(lib);
+        }
     }
     return result;
 }
@@ -843,17 +869,17 @@ function _rollout(arr, toPlay, t, size) {
         const enemy = player === 1 ? 2 : 1;
         let played  = false;
 
-        // Priority 1: capture (fill last lib of enemy group)
-        const captures = _urgentMoves(cur, enemy, t, N);
+        // Priority 1: capture (fill last lib of enemy group at 1 lib)
+        const captures = _urgentMoves(cur, enemy, t, N, 1);
         if (captures.length > 0) {
             const idx  = captures[(Math.random() * captures.length) | 0];
             const next = _applyMove(cur, idx, player, t);
             if (next) { cur = next; played = true; passes = 0; }
         }
 
-        // Priority 2: defend (fill last lib of own group)
+        // Priority 2: defend (fill last lib of own group at 1 lib)
         if (!played) {
-            const defends = _urgentMoves(cur, player, t, N);
+            const defends = _urgentMoves(cur, player, t, N, 1);
             if (defends.length > 0) {
                 const idx  = defends[(Math.random() * defends.length) | 0];
                 const next = _applyMove(cur, idx, player, t);
@@ -861,7 +887,17 @@ function _rollout(arr, toPlay, t, size) {
             }
         }
 
-        // Priority 3: random valid move
+        // Priority 3: extend own group at 2 libs (pre-atari — escape before surrounded)
+        if (!played) {
+            const extends2 = _urgentMoves(cur, player, t, N, 2);
+            if (extends2.length > 0) {
+                const idx  = extends2[(Math.random() * extends2.length) | 0];
+                const next = _applyMove(cur, idx, player, t);
+                if (next) { cur = next; played = true; passes = 0; }
+            }
+        }
+
+        // Priority 4: random valid move
         if (!played) {
             const empties = [];
             for (let i = 0; i < N; i++) if (cur[i] === 0) empties.push(i);
