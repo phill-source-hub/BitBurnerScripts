@@ -1,6 +1,6 @@
 /**
  * dnet-orchestrate.js
- * Version: 1.21.0
+ * Version: 1.22.0
  *
  * Master darknet controller: crack → memfree → relay → phish → stasis.
  *
@@ -44,6 +44,9 @@
  *   own PID and needs no session for phishingAttack().
  *
  * Changelog:
+ *   v1.22.0 - collectCaches(): open .cache files on the current host at the start of
+ *            every cycle. Covers home node and all relay nodes — previously only
+ *            dnet-phish.js (leaf nodes) claimed cache rewards.
  *   v1.21.0 - DEFER after partial memfree: any residual blockedRam (even 0.04 GB from
             code=351 rate-limit) prevents exec. Re-read blockedRam after freeMemory;
             if still > 0, skip relay/phish/stasis and retry next mutation.
@@ -207,7 +210,7 @@ let canExecSelf = false;
 /** @param {NS} ns */
 export async function main(ns) {
     ns.ramOverride(15);                                                              // Calculated cost is 16.30 GB but darkweb cap is 16 GB; override to fit
-    ns.tprint('=== dnet-orchestrate.js v1.21.0 ===');
+    ns.tprint('=== dnet-orchestrate.js v1.22.0 ===');
     ns.tprint('Args: ' + JSON.stringify(ns.args));
     ns.disableLog('ALL');
 
@@ -224,7 +227,7 @@ export async function main(ns) {
         return;
     }
 
-    log(ns, '=== dnet-orchestrate.js v1.21.0 ===');
+    log(ns, '=== dnet-orchestrate.js v1.22.0 ===');
     log(ns, 'Starting on ' + ns.getHostname());
 
     clearPort(ns, PORT_CRACK_RESULT);                                                // Discard stale crack results from a previous run on this host
@@ -260,6 +263,24 @@ export async function main(ns) {
 
 
 // =============================================================================
+// Cache collection
+// =============================================================================
+
+/**
+ * Opens all .cache files present on the current host and logs the result.
+ * Called every cycle so rewards from memoryReallocation() are never missed.
+ * Works on home, darkweb hub, and cracked relay nodes — anywhere orchestrate runs.
+ */
+function collectCaches(ns) {
+    const caches = ns.ls(ns.getHostname(), '.cache');
+    for (const file of caches) {
+        const r = ns.dnet.openCache(file);
+        log(ns, 'Cache opened ' + file + ': ' + (r.message || JSON.stringify(r)));
+    }
+}
+
+
+// =============================================================================
 // Main cycle
 // =============================================================================
 
@@ -270,6 +291,7 @@ export async function main(ns) {
  * @returns {Promise<void>}
  */
 async function runCycle(ns, flags) {
+    collectCaches(ns);                                                               // Claim any .cache rewards on this host before processing
     if (canExecSelf) checkCrackResults(ns);                                         // Drain port 7 results from crack workers (only when workers are in use)
 
     const dnet     = ns.dnet;
