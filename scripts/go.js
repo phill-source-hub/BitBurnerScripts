@@ -122,7 +122,7 @@
  * RAM: ~6 GB (ns.go.* + ns.go.analysis.* calls)
  */
 
-const VERSION       = '3.18.0';
+const VERSION       = '3.18.1';
 const WIN_THRESHOLD = 3;
 
 const OPPONENTS = [
@@ -385,10 +385,11 @@ function pickMove(ns, board, validMoves, liberties, controlled, size, moveNum) {
         }
     }
 
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) { ns.print('[GO] MCTS: 0 candidates (validMoves empty?)'); return null; }
 
     candidates.sort((a, b) => b.h - a.h);
     const top = candidates.slice(0, Math.min(MCTS_CANDIDATES, candidates.length));
+    ns.print('[GO] MCTS: ' + candidates.length + ' candidates, top=' + top.length);
 
     let bestMove = top[0];
     let bestRate = -1;
